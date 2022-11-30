@@ -255,6 +255,12 @@ impl Obj2Brs {
     }
 
     fn do_conversion(&mut self) {
+        if self.rampify {
+            self.simplify = false;
+            self.match_brickadia_colorset = true;
+            self.bricktype = BrickType::Default;
+        }
+
         println!("{:?}", self);
         let mut octree = match generate_octree(self) {
             Ok(tree) => tree,
@@ -343,11 +349,7 @@ fn write_brs_data(
     opts: &mut Obj2Brs,
 ) {
     let mut max_merge = 200;
-
     if opts.rampify {
-        opts.simplify = false;
-        opts.match_brickadia_colorset = true;
-        opts.bricktype = BrickType::Default;
         max_merge = 1;
     }
 
