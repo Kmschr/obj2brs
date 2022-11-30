@@ -20,7 +20,9 @@ use rfd::FileDialog;
 use std::{
     env,
     fs::File,
-    path::Path, ops::RangeInclusive};
+    path::Path, path::PathBuf, ops::RangeInclusive,
+    thread,
+    sync::mpsc, sync::mpsc::Receiver};
 use voxelize::voxelize;
 
 const WINDOW_WIDTH: f32 = 600.;
@@ -31,10 +33,12 @@ const OBJ_ICON: &[u8; 10987] = include_bytes!("../res/obj_icon.png");
 #[derive(Debug)]
 pub struct Obj2Brs {
     pub bricktype: BrickType,
+    input_file_path_receiver: Option<Receiver<Option<PathBuf>>>,
     input_file_path: String,
     pub match_brickadia_colorset: bool,
     material: Material,
     material_intensity: u32,
+    output_directory_receiver: Option<Receiver<Option<PathBuf>>>,
     output_directory: String,
     save_owner_id: String,
     save_owner_name: String,
@@ -66,10 +70,12 @@ impl Default for Obj2Brs {
     fn default() -> Self {
         Self {
             bricktype: BrickType::Microbricks,
+            input_file_path_receiver: None,
             input_file_path: "test.obj".into(),
             match_brickadia_colorset: false,
             material: Material::Plastic,
             material_intensity: 5,
+            output_directory_receiver: None,
             output_directory: "builds".into(),
             save_owner_id: "d66c4ad5-59fc-4a9b-80b8-08dedc25bff9".into(),
             save_owner_name: "obj2brs".into(),
@@ -84,6 +90,8 @@ impl Default for Obj2Brs {
 
 impl App for Obj2Brs {
     fn update(&mut self, ctx: &egui::Context, _frame: &eframe::epi::Frame) {
+        self.receive_file_dialog_messages();
+
         let input_file_valid = Path::new(&self.input_file_path).exists();
         let output_dir_valid = Path::new(&self.output_directory).is_dir();
         let uuid_valid = Uuid::parse_str(&self.save_owner_id).is_ok();
@@ -116,23 +124,39 @@ impl App for Obj2Brs {
 }
 
 impl Obj2Brs {
+    fn receive_file_dialog_messages(&mut self) {
+        if let Some(rx) = &self.input_file_path_receiver {
+            if let Ok(data) = rx.try_recv() {
+                self.input_file_path_receiver = None;
+                if let Some(path) = data {
+                    self.input_file_path = path.into_os_string().into_string().unwrap();
+                }
+            }
+        }
+
+        if let Some(rx) = &self.output_directory_receiver {
+            if let Ok(data) = rx.try_recv() {
+                self.output_directory_receiver = None;
+                if let Some(path) = data {
+                    self.output_directory = path.into_os_string().into_string().unwrap();
+                }
+            }
+        }
+    }
+
     fn paths(&mut self, ui: &mut Ui, input_file_valid: bool, output_dir_valid: bool) {
         let file_color = gui::bool_color(input_file_valid);
 
         ui.label("OBJ File").on_hover_text("Model to convert");
         ui.horizontal(|ui| {
             ui.add(TextEdit::singleline(&mut self.input_file_path).desired_width(400.0).text_color(file_color));
-            if gui::file_button(ui) {
-                match FileDialog::new().add_filter("OBJ", &["obj"]).pick_file(){
-                    Some(path) => {
-                        self.input_file_path = path.to_string_lossy().into_owned();
-                        self.save_name = match path.file_stem() {
-                            Some(s) => s.to_string_lossy().into_owned(),
-                            None => self.save_name.clone()
-                        };
-                    },
-                    None => ()
-                }
+            if gui::file_button(ui) && self.input_file_path_receiver.is_none() {
+                let (tx, rx) = mpsc::channel();
+                self.input_file_path_receiver = Some(rx);
+                thread::spawn(move || {
+                    let obj_path = FileDialog::new().add_filter("OBJ", &["obj"]).pick_file();
+                    tx.send(obj_path).unwrap();
+                });
             }
         });
         ui.end_row();
@@ -142,18 +166,18 @@ impl Obj2Brs {
         ui.label("Output Directory").on_hover_text("Where generated save will be written to");
         ui.horizontal(|ui| {
             ui.add(TextEdit::singleline(&mut self.output_directory).desired_width(400.0).text_color(dir_color));
-            if gui::file_button(ui) {
-                let mut dialog = FileDialog::new();
-                if output_dir_valid {
-                    dialog = dialog.set_directory(Path::new(self.output_directory.as_str()));
-                }
-
-                match dialog.pick_folder() {
-                    Some(path) => {
-                        self.output_directory = path.to_string_lossy().into_owned();
-                    },
-                    None => ()
-                }
+            if gui::file_button(ui) && self.output_directory_receiver.is_none() {
+                let (tx, rx) = mpsc::channel();
+                self.output_directory_receiver = Some(rx);
+                let default_dir = self.output_directory.clone();
+                thread::spawn(move || {
+                    let mut dialog = FileDialog::new();
+                    if output_dir_valid {
+                        dialog = dialog.set_directory(Path::new(default_dir.as_str()));
+                    }
+                    let output_dir = dialog.pick_folder();
+                    tx.send(output_dir).unwrap();
+                });
             }
         });
         ui.end_row();
