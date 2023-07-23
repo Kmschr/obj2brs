@@ -12,17 +12,15 @@ mod voxelize;
 use brickadia as brs;
 use brs::save::Preview;
 use cgmath::Vector4;
-use eframe::{run_native, NativeOptions, epi::App, egui, egui::*};
+use eframe::{egui, egui::*, epi::App, run_native, NativeOptions};
 use gui::bool_color;
-use simplify::*;
-use uuid::Uuid;
 use rfd::FileDialog;
+use simplify::*;
 use std::{
-    env,
-    fs::File,
-    path::Path, path::PathBuf, ops::RangeInclusive,
-    thread,
-    sync::mpsc, sync::mpsc::Receiver};
+    env, fs::File, ops::RangeInclusive, path::Path, path::PathBuf, sync::mpsc,
+    sync::mpsc::Receiver, thread,
+};
+use uuid::Uuid;
 use voxelize::voxelize;
 
 const WINDOW_WIDTH: f32 = 600.;
@@ -33,6 +31,7 @@ const OBJ_ICON: &[u8; 10987] = include_bytes!("../res/obj_icon.png");
 #[derive(Debug)]
 pub struct Obj2Brs {
     pub bricktype: BrickType,
+    pub brick_scale: isize,
     input_file_path_receiver: Option<Receiver<Option<PathBuf>>>,
     input_file_path: String,
     pub match_brickadia_colorset: bool,
@@ -53,7 +52,7 @@ pub struct Obj2Brs {
 pub enum BrickType {
     Microbricks,
     Default,
-    Tiles
+    Tiles,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -70,6 +69,7 @@ impl Default for Obj2Brs {
     fn default() -> Self {
         Self {
             bricktype: BrickType::Microbricks,
+            brick_scale: 1,
             input_file_path_receiver: None,
             input_file_path: "test.obj".into(),
             match_brickadia_colorset: false,
@@ -98,13 +98,9 @@ impl App for Obj2Brs {
         let can_convert = input_file_valid && output_dir_valid && uuid_valid;
 
         CentralPanel::default().show(ctx, |ui: &mut Ui| {
-            gui::add_grid(ui, |ui| {
-                self.paths(ui, input_file_valid, output_dir_valid)
-            });
+            gui::add_grid(ui, |ui| self.paths(ui, input_file_valid, output_dir_valid));
             gui::add_horizontal_line(ui);
-            gui::add_grid(ui, |ui| {
-                self.options(ui, uuid_valid)
-            });
+            gui::add_grid(ui, |ui| self.options(ui, uuid_valid));
             gui::info_text(ui);
 
             ui.add_space(10.);
@@ -149,7 +145,11 @@ impl Obj2Brs {
 
         ui.label("OBJ File").on_hover_text("Model to convert");
         ui.horizontal(|ui| {
-            ui.add(TextEdit::singleline(&mut self.input_file_path).desired_width(400.0).text_color(file_color));
+            ui.add(
+                TextEdit::singleline(&mut self.input_file_path)
+                    .desired_width(400.0)
+                    .text_color(file_color),
+            );
             if gui::file_button(ui) && self.input_file_path_receiver.is_none() {
                 let (tx, rx) = mpsc::channel();
                 self.input_file_path_receiver = Some(rx);
@@ -163,9 +163,14 @@ impl Obj2Brs {
 
         let dir_color = gui::bool_color(output_dir_valid);
 
-        ui.label("Output Directory").on_hover_text("Where generated save will be written to");
+        ui.label("Output Directory")
+            .on_hover_text("Where generated save will be written to");
         ui.horizontal(|ui| {
-            ui.add(TextEdit::singleline(&mut self.output_directory).desired_width(400.0).text_color(dir_color));
+            ui.add(
+                TextEdit::singleline(&mut self.output_directory)
+                    .desired_width(400.0)
+                    .text_color(dir_color),
+            );
             if gui::file_button(ui) && self.output_directory_receiver.is_none() {
                 let (tx, rx) = mpsc::channel();
                 self.output_directory_receiver = Some(rx);
@@ -182,16 +187,20 @@ impl Obj2Brs {
         });
         ui.end_row();
 
-        ui.label("Save Name").on_hover_text("Name for the brickadia savefile");
+        ui.label("Save Name")
+            .on_hover_text("Name for the brickadia savefile");
         ui.add(TextEdit::singleline(&mut self.save_name));
         ui.end_row();
     }
 
     fn options(&mut self, ui: &mut Ui, uuid_valid: bool) {
-
-        ui.label("Lossy Conversion")
-            .on_hover_text("Whether or not to merge similar bricks to create a less detailed model");
-        ui.add_enabled(!self.rampify, Checkbox::new(&mut self.simplify, "Simplify (reduces brickcount)"));
+        ui.label("Lossy Conversion").on_hover_text(
+            "Whether or not to merge similar bricks to create a less detailed model",
+        );
+        ui.add_enabled(
+            !self.rampify,
+            Checkbox::new(&mut self.simplify, "Simplify (reduces brickcount)"),
+        );
         ui.end_row();
 
         ui.label("Raise Underground")
@@ -199,19 +208,32 @@ impl Obj2Brs {
         ui.add(Checkbox::new(&mut self.raise, ""));
         ui.end_row();
 
-        ui.label("Match to Colorset")
-            .on_hover_text("Modify the color of the model to match the default color palette in Brickadia");
-        ui.add_enabled(!self.rampify, Checkbox::new(&mut self.match_brickadia_colorset, "Use Default Palette"));
+        ui.label("Match to Colorset").on_hover_text(
+            "Modify the color of the model to match the default color palette in Brickadia",
+        );
+        ui.add_enabled(
+            !self.rampify,
+            Checkbox::new(&mut self.match_brickadia_colorset, "Use Default Palette"),
+        );
         ui.end_row();
 
-        ui.label("Rampify")
-            .on_hover_text("Creates a Lego-World like rampification of the model, uses default colorset");
-        ui.add(Checkbox::new(&mut self.rampify, "Run the result through Wrapperup's plate-rampifier"));
+        ui.label("Rampify").on_hover_text(
+            "Creates a Lego-World like rampification of the model, uses default colorset",
+        );
+        ui.add(Checkbox::new(
+            &mut self.rampify,
+            "Run the result through Wrapperup's plate-rampifier",
+        ));
         ui.end_row();
 
         ui.label("Scale")
             .on_hover_text("Adjusts the overall size of the generated save");
-        ui.add(DragValue::new(&mut self.scale).min_decimals(2).prefix("x").speed(0.1));
+        ui.add(
+            DragValue::new(&mut self.scale)
+                .min_decimals(2)
+                .prefix("x")
+                .speed(0.1),
+        );
         ui.end_row();
 
         ui.label("Bricktype")
@@ -227,6 +249,16 @@ impl Obj2Brs {
         });
         ui.end_row();
 
+        if self.bricktype == BrickType::Microbricks {
+            ui.label("Brick Scale")
+                .on_hover_text("Use this to make microbricks bigger for a more pixelated look");
+            ui.add(
+                DragValue::new(&mut self.brick_scale)
+                    .prefix("x")
+                    .clamp_range(1..=500),
+            );
+        }
+
         ui.label("Material");
         ComboBox::from_label("\n")
             .selected_text(format!("{:?}", &mut self.material))
@@ -241,15 +273,23 @@ impl Obj2Brs {
         ui.end_row();
 
         ui.label("Material Intensity");
-        ui.add(Slider::new(&mut self.material_intensity, RangeInclusive::new(0, 10)));
+        ui.add(Slider::new(
+            &mut self.material_intensity,
+            RangeInclusive::new(0, 10),
+        ));
         ui.end_row();
 
         let id_color = bool_color(uuid_valid);
 
-        ui.label("Brick Owner").on_hover_text("Who will have ownership of the generated bricks");
+        ui.label("Brick Owner")
+            .on_hover_text("Who will have ownership of the generated bricks");
         ui.horizontal(|ui| {
             ui.add(TextEdit::singleline(&mut self.save_owner_name).desired_width(100.0));
-            ui.add(TextEdit::singleline(&mut self.save_owner_id).desired_width(300.0).text_color(id_color));
+            ui.add(
+                TextEdit::singleline(&mut self.save_owner_id)
+                    .desired_width(300.0)
+                    .text_color(id_color),
+            );
         });
         ui.end_row();
     }
@@ -272,10 +312,7 @@ impl Obj2Brs {
             }
         };
 
-        write_brs_data(
-            &mut octree,
-            self,
-        );
+        write_brs_data(&mut octree, self);
     }
 }
 
@@ -284,12 +321,17 @@ fn generate_octree(opt: &Obj2Brs) -> Result<octree::VoxelTree<Vector4<u8>>, Stri
     println!("Loading {:?}", p);
     match File::open(p) {
         Ok(_f) => println!("success"),
-        Err(e) => println!("{}", e.to_string())
+        Err(e) => println!("{}", e.to_string()),
     }
 
     println!("Importing model...");
     let (mut models, materials) = match tobj::load_obj(&opt.input_file_path, true) {
-        Err(e) => return Err(format!("Error encountered when loading obj file: {}", e.to_string())),
+        Err(e) => {
+            return Err(format!(
+                "Error encountered when loading obj file: {}",
+                e.to_string()
+            ))
+        }
         Ok(f) => f,
     };
 
@@ -305,7 +347,9 @@ fn generate_octree(opt: &Obj2Brs) -> Result<octree::VoxelTree<Vector4<u8>>, Stri
             // Create mock texture from diffuse color
             let mut image = image::RgbaImage::new(1, 1);
 
-            image.put_pixel(0,0,
+            image.put_pixel(
+                0,
+                0,
                 image::Rgba([
                     color::ftoi(material.diffuse[0]),
                     color::ftoi(material.diffuse[1]),
@@ -316,19 +360,24 @@ fn generate_octree(opt: &Obj2Brs) -> Result<octree::VoxelTree<Vector4<u8>>, Stri
 
             material_images.push(image);
         } else {
-            let image_path = Path::new(&opt.input_file_path).parent().unwrap().join(&material.diffuse_texture);
+            let image_path = Path::new(&opt.input_file_path)
+                .parent()
+                .unwrap()
+                .join(&material.diffuse_texture);
             println!(
                 "\tLoading diffuse texture for {} from: {:?}",
                 material.name, image_path
             );
 
             let image = match image::open(&image_path) {
-                Err(e) => return Err(format!(
-                    "Error encountered when loading {} texture file from {:?}: {}",
-                    &material.diffuse_texture,
-                    &image_path,
-                    e.to_string()
-                )),
+                Err(e) => {
+                    return Err(format!(
+                        "Error encountered when loading {} texture file from {:?}: {}",
+                        &material.diffuse_texture,
+                        &image_path,
+                        e.to_string()
+                    ))
+                }
                 Ok(f) => f.into_rgba8(),
             };
             material_images.push(image);
@@ -344,10 +393,7 @@ fn generate_octree(opt: &Obj2Brs) -> Result<octree::VoxelTree<Vector4<u8>>, Stri
     ))
 }
 
-fn write_brs_data(
-    octree: &mut octree::VoxelTree<Vector4<u8>>,
-    opts: &mut Obj2Brs,
-) {
+fn write_brs_data(octree: &mut octree::VoxelTree<Vector4<u8>>, opts: &mut Obj2Brs) {
     let mut max_merge = 200;
     if opts.rampify {
         max_merge = 1;
@@ -365,14 +411,13 @@ fn write_brs_data(
             ..Default::default()
         },
         header2: brs::save::Header2 {
-            brick_assets:
-                vec![
-                    "PB_DefaultMicroBrick".into(),
-                    "PB_DefaultBrick".into(),
-                    "PB_DefaultRamp".into(),
-                    "PB_DefaultWedge".into(),
-                    "PB_DefaultTile".into(),
-                ],
+            brick_assets: vec![
+                "PB_DefaultMicroBrick".into(),
+                "PB_DefaultBrick".into(),
+                "PB_DefaultRamp".into(),
+                "PB_DefaultWedge".into(),
+                "PB_DefaultTile".into(),
+            ],
             materials: match opts.material {
                 Material::Plastic => vec!["BMC_Plastic".into()],
                 Material::Glass => vec!["BMC_Glass".into()],
@@ -405,7 +450,7 @@ fn write_brs_data(
         for brick in &write_data.bricks {
             let height = match brick.size {
                 brs::save::Size::Procedural(_x, _y, z) => z,
-                _ => 0
+                _ => 0,
             };
             let z = brick.position.2 - height as i32;
             if z < min_z {
@@ -428,7 +473,9 @@ fn write_brs_data(
     let preview = image::load_from_memory_with_format(OBJ_ICON, image::ImageFormat::Png).unwrap();
 
     let mut preview_bytes = Vec::new();
-    preview.write_to(&mut preview_bytes, image::ImageOutputFormat::Png).unwrap();
+    preview
+        .write_to(&mut preview_bytes, image::ImageOutputFormat::Png)
+        .unwrap();
 
     write_data.preview = Preview::PNG(preview_bytes);
 
@@ -442,8 +489,18 @@ fn write_brs_data(
 
 fn main() {
     let build_dir = match env::consts::OS {
-        "windows" => dirs::data_local_dir().unwrap().to_str().unwrap().to_string() + "\\Brickadia\\Saved\\Builds",
-        "linux" => dirs::config_dir().unwrap().to_str().unwrap().to_string() + "/Epic/Brickadia/Saved/Builds",
+        "windows" => {
+            dirs::data_local_dir()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string()
+                + "\\Brickadia\\Saved\\Builds"
+        }
+        "linux" => {
+            dirs::config_dir().unwrap().to_str().unwrap().to_string()
+                + "/Epic/Brickadia/Saved/Builds"
+        }
         _ => String::new(),
     };
 
