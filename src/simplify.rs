@@ -153,7 +153,7 @@ pub fn simplify_lossless(
     let colorset = convert_colorset_to_hsv(&save_data.header2.colors);
 
     let scales: (isize, isize, isize) = if opts.bricktype == BrickType::Microbricks {
-        (1, 1, 1)
+        (opts.brick_scale, opts.brick_scale, opts.brick_scale)
     } else {
         (5, 5, 2)
     };
