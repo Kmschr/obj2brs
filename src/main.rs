@@ -394,7 +394,7 @@ fn generate_octree(opt: &Obj2Brs) -> Result<octree::VoxelTree<Vector4<u8>>, Stri
 }
 
 fn write_brs_data(octree: &mut octree::VoxelTree<Vector4<u8>>, opts: &mut Obj2Brs) {
-    let mut max_merge = 200;
+    let mut max_merge = 500;
     if opts.rampify {
         max_merge = 1;
     }

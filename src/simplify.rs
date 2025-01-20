@@ -19,6 +19,9 @@ pub fn simplify_lossy(
         (5, 5, 2)
     };
 
+    let max_scale = isize::max(isize::max(scales.0, scales.1), scales.2);
+    let max_merge = max_merge / max_scale;
+
     loop {
         let mut colors = Vec::<Vector4<u8>>::new();
         let (x, y, z);
@@ -157,6 +160,9 @@ pub fn simplify_lossless(
     } else {
         (5, 5, 2)
     };
+
+    let max_scale = isize::max(isize::max(scales.0, scales.1), scales.2);
+    let max_merge = max_merge / max_scale;
 
     loop {
         let matched_color;
