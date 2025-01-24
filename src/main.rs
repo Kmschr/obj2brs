@@ -16,6 +16,7 @@ use eframe::{egui, egui::*, epi::App, run_native, NativeOptions};
 use gui::bool_color;
 use rfd::FileDialog;
 use simplify::*;
+use tobj::LoadOptions;
 use std::{
     env, fs::File, ops::RangeInclusive, path::Path, path::PathBuf, sync::mpsc,
     sync::mpsc::Receiver, thread,
@@ -325,7 +326,13 @@ fn generate_octree(opt: &Obj2Brs) -> Result<octree::VoxelTree<Vector4<u8>>, Stri
     }
 
     println!("Importing model...");
-    let (mut models, materials) = match tobj::load_obj(&opt.input_file_path, true) {
+    let load_options = LoadOptions {
+        triangulate: true,
+        ignore_lines: true,
+        ignore_points: true,
+        ..Default::default()
+    };
+    let (mut models, materials) = match tobj::load_obj(&opt.input_file_path, &load_options) {
         Err(e) => {
             return Err(format!(
                 "Error encountered when loading obj file: {}",
@@ -337,7 +344,7 @@ fn generate_octree(opt: &Obj2Brs) -> Result<octree::VoxelTree<Vector4<u8>>, Stri
 
     println!("Loading materials...");
     let mut material_images = Vec::<image::RgbaImage>::new();
-    for material in materials {
+    for material in materials.unwrap() {
         if material.diffuse_texture == "" {
             println!(
                 "\tMaterial {} does not have an associated diffuse texture",
