@@ -330,6 +330,7 @@ fn generate_octree(opt: &Obj2Brs) -> Result<octree::VoxelTree<Vector4<u8>>, Stri
         triangulate: true,
         ignore_lines: true,
         ignore_points: true,
+        single_index: true,
         ..Default::default()
     };
     let (mut models, materials) = match tobj::load_obj(&opt.input_file_path, &load_options) {
