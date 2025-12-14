@@ -1,4 +1,5 @@
 mod barycentric;
+mod brdb_support;
 mod color;
 mod gui;
 mod icon;
@@ -16,11 +17,11 @@ use eframe::{egui, egui::*, epi::App, run_native, NativeOptions};
 use gui::bool_color;
 use rfd::FileDialog;
 use simplify::*;
-use tobj::LoadOptions;
 use std::{
     env, fs::File, ops::RangeInclusive, path::Path, path::PathBuf, sync::mpsc,
     sync::mpsc::Receiver, thread,
 };
+use tobj::LoadOptions;
 use uuid::Uuid;
 use voxelize::voxelize;
 
@@ -47,6 +48,7 @@ pub struct Obj2Brs {
     save_name: String,
     scale: f32,
     simplify: bool,
+    use_legacy_format: bool,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -85,6 +87,7 @@ impl Default for Obj2Brs {
             save_name: "test".into(),
             scale: 1.0,
             simplify: false,
+            use_legacy_format: false,
         }
     }
 }
@@ -207,6 +210,11 @@ impl Obj2Brs {
         ui.label("Raise Underground")
             .on_hover_text("Prevents bricks under the ground plate in Brickadia");
         ui.add(Checkbox::new(&mut self.raise, ""));
+        ui.end_row();
+
+        ui.label("Legacy Format (.brs)")
+            .on_hover_text("Use the old .brs save format instead of the new .brz format");
+        ui.add(Checkbox::new(&mut self.use_legacy_format, ""));
         ui.end_row();
 
         ui.label("Match to Colorset").on_hover_text(
@@ -487,10 +495,31 @@ fn write_brs_data(octree: &mut octree::VoxelTree<Vector4<u8>>, opts: &mut Obj2Br
 
     write_data.preview = Preview::PNG(preview_bytes);
 
-    let output_file_path = opts.output_directory.clone() + "/" + &opts.save_name + ".brs";
-    brs::write::SaveWriter::new(File::create(output_file_path).unwrap(), write_data)
-        .write()
-        .unwrap();
+    if opts.use_legacy_format {
+        let output_file_path = opts.output_directory.clone() + "/" + &opts.save_name + ".brs";
+        brs::write::SaveWriter::new(File::create(output_file_path).unwrap(), write_data)
+            .write()
+            .unwrap();
+        println!("Legacy .brs Save Written!");
+    } else {
+        let output_file_path =
+            PathBuf::from(&opts.output_directory).join(opts.save_name.clone() + ".brz");
+        // Determine if we should use procedural bricks based on brick type
+        let use_procedural = opts.bricktype != BrickType::Default;
+
+        // Convert preview to Jpeg for BRZ
+        let mut preview_bytes_jpg = Vec::new();
+        preview
+            .write_to(&mut preview_bytes_jpg, image::ImageOutputFormat::Jpeg(85))
+            .unwrap();
+
+        brdb_support::write_brz(
+            output_file_path,
+            &write_data,
+            use_procedural,
+            Some(preview_bytes_jpg),
+        );
+    }
 
     println!("Save Written!");
 }

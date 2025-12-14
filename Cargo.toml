@@ -11,6 +11,7 @@ include = ["reference.brs"]
 [dependencies]
 brickadia = "0.1.14"
 tobj = "3.2.5"
+brdb = "0.4"
 cgmath = "0.17"
 image = "0.23"
 uuid = "0.7"
