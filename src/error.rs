@@ -9,20 +9,8 @@ pub enum ConversionError {
     #[error("Failed to parse OBJ file: {0}")]
     ObjParseError(String),
 
-    #[error("No materials found in OBJ file")]
-    NoMaterials,
-
-    #[error("Material file not found: {path}")]
-    MaterialFileNotFound { path: PathBuf },
-
-    #[error("Texture file not found: {path}\nMaterial: {material}")]
-    TextureNotFound { path: PathBuf, material: String },
-
     #[error("Failed to load texture {path}: {reason}")]
     TextureLoadError { path: PathBuf, reason: String },
-
-    #[error("Failed to create output directory: {path}")]
-    OutputDirError { path: PathBuf },
 
     #[error("Failed to write save file: {0}")]
     SaveWriteError(String),
