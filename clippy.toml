@@ -1,0 +1,7 @@
+# Clippy configuration for obj2brs
+
+# Warn about TODO/FIXME comments
+warn-on-all-wildcard-imports = true
+
+# Pedantic lints that we want to enable
+# (start conservative, can enable more later)

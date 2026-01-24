@@ -40,7 +40,7 @@ pub fn rampify(save: &mut SaveData) {
             let l = l_half as i32 / 5;
             let h = h_half as i32 / 2;
 
-            let pos = fix_brick_pos(&brick);
+            let pos = fix_brick_pos(brick);
 
             min_bounds.0 = min_bounds.0.min(pos.0);
             min_bounds.1 = min_bounds.1.min(pos.1);
@@ -72,7 +72,7 @@ pub fn rampify(save: &mut SaveData) {
 
     for brick in &save.bricks {
         if let Size::Procedural(w_half, l_half, h_half) = brick.size {
-            let pos = fix_brick_pos(&brick);
+            let pos = fix_brick_pos(brick);
             let pos = (
                 (pos.0 - min_bounds.0) as usize,
                 (pos.1 - min_bounds.1) as usize,
@@ -139,7 +139,7 @@ pub fn rampify(save: &mut SaveData) {
             }
         }
 
-        return true;
+        true
     };
 
 

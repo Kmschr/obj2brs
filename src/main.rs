@@ -18,7 +18,7 @@ use gui::bool_color;
 use rfd::FileDialog;
 use simplify::*;
 use std::{
-    env, fs::File, ops::RangeInclusive, path::Path, path::PathBuf, sync::mpsc,
+    env, fs::File, io::Cursor, ops::RangeInclusive, path::Path, path::PathBuf, sync::mpsc,
     sync::mpsc::Receiver, thread,
 };
 use tobj::LoadOptions;
@@ -330,7 +330,7 @@ fn generate_octree(opt: &Obj2Brs) -> Result<octree::VoxelTree<Vector4<u8>>, Stri
     println!("Loading {:?}", p);
     match File::open(p) {
         Ok(_f) => println!("success"),
-        Err(e) => println!("{}", e.to_string()),
+        Err(e) => println!("{}", e),
     }
 
     println!("Importing model...");
@@ -339,13 +339,12 @@ fn generate_octree(opt: &Obj2Brs) -> Result<octree::VoxelTree<Vector4<u8>>, Stri
         ignore_lines: true,
         ignore_points: true,
         single_index: true,
-        ..Default::default()
     };
     let (mut models, materials) = match tobj::load_obj(&opt.input_file_path, &load_options) {
         Err(e) => {
             return Err(format!(
                 "Error encountered when loading obj file: {}",
-                e.to_string()
+                e
             ))
         }
         Ok(f) => f,
@@ -354,7 +353,7 @@ fn generate_octree(opt: &Obj2Brs) -> Result<octree::VoxelTree<Vector4<u8>>, Stri
     println!("Loading materials...");
     let mut material_images = Vec::<image::RgbaImage>::new();
     for material in materials.unwrap() {
-        if material.diffuse_texture == "" {
+        if material.diffuse_texture.is_none() || material.diffuse_texture.as_ref().unwrap() == "" {
             println!(
                 "\tMaterial {} does not have an associated diffuse texture",
                 material.name
@@ -363,23 +362,27 @@ fn generate_octree(opt: &Obj2Brs) -> Result<octree::VoxelTree<Vector4<u8>>, Stri
             // Create mock texture from diffuse color
             let mut image = image::RgbaImage::new(1, 1);
 
+            let diffuse = material.diffuse.unwrap_or([1.0, 1.0, 1.0]);
+            let dissolve = material.dissolve.unwrap_or(1.0);
+
             image.put_pixel(
                 0,
                 0,
                 image::Rgba([
-                    color::ftoi(material.diffuse[0]),
-                    color::ftoi(material.diffuse[1]),
-                    color::ftoi(material.diffuse[2]),
-                    color::ftoi(material.dissolve),
+                    color::ftoi(diffuse[0]),
+                    color::ftoi(diffuse[1]),
+                    color::ftoi(diffuse[2]),
+                    color::ftoi(dissolve),
                 ]),
             );
 
             material_images.push(image);
         } else {
+            let texture_name = material.diffuse_texture.as_ref().unwrap();
             let image_path = Path::new(&opt.input_file_path)
                 .parent()
                 .unwrap()
-                .join(&material.diffuse_texture);
+                .join(texture_name);
             println!(
                 "\tLoading diffuse texture for {} from: {:?}",
                 material.name, image_path
@@ -389,9 +392,9 @@ fn generate_octree(opt: &Obj2Brs) -> Result<octree::VoxelTree<Vector4<u8>>, Stri
                 Err(e) => {
                     return Err(format!(
                         "Error encountered when loading {} texture file from {:?}: {}",
-                        &material.diffuse_texture,
+                        texture_name,
                         &image_path,
-                        e.to_string()
+                        e
                     ))
                 }
                 Ok(f) => f.into_rgba8(),
@@ -490,7 +493,7 @@ fn write_brs_data(octree: &mut octree::VoxelTree<Vector4<u8>>, opts: &mut Obj2Br
 
     let mut preview_bytes = Vec::new();
     preview
-        .write_to(&mut preview_bytes, image::ImageOutputFormat::Png)
+        .write_to(&mut Cursor::new(&mut preview_bytes), image::ImageOutputFormat::Png)
         .unwrap();
 
     write_data.preview = Preview::PNG(preview_bytes);
@@ -510,7 +513,7 @@ fn write_brs_data(octree: &mut octree::VoxelTree<Vector4<u8>>, opts: &mut Obj2Br
         // Convert preview to Jpeg for BRZ
         let mut preview_bytes_jpg = Vec::new();
         preview
-            .write_to(&mut preview_bytes_jpg, image::ImageOutputFormat::Jpeg(85))
+            .write_to(&mut Cursor::new(&mut preview_bytes_jpg), image::ImageOutputFormat::Jpeg(85))
             .unwrap();
 
         brdb_support::write_brz(

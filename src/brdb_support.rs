@@ -1,4 +1,3 @@
-use brdb;
 use brickadia as brs;
 use std::path::PathBuf;
 // Use root imports
@@ -95,6 +94,9 @@ pub fn write_brz(
                 interact: brick.collision.interaction,
                 tool: brick.collision.tool,
                 physics: true,
+                player1: Some(brick.collision.player),
+                player2: Some(brick.collision.player),
+                player3: Some(brick.collision.player),
             },
             visible: brick.visibility,
             color,

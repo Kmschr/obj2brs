@@ -4,7 +4,6 @@ use crate::BrickType;
 use crate::intersect::intersect;
 use crate::octree::{Branches, TreeBody, VoxelTree};
 
-use tobj;
 
 use cgmath::{Vector2, Vector3, Vector4};
 use image::RgbaImage;
@@ -18,7 +17,7 @@ struct Triangle {
 }
 
 pub fn voxelize(
-    models: &mut Vec<tobj::Model>,
+    models: &mut [tobj::Model],
     materials: &[RgbaImage],
     scale: f32,
     bricktype: BrickType,
@@ -118,8 +117,8 @@ pub fn voxelize(
     octree
 }
 
-fn recursive_voxelize<'a>(
-    branches: &'a mut Branches<Vector4<u8>>,
+fn recursive_voxelize(
+    branches: &mut Branches<Vector4<u8>>,
     mask: isize,
     vector: Vec<Triangle>,
     materials: &[RgbaImage],

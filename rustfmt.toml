@@ -1,0 +1,14 @@
+# Rustfmt configuration for obj2brs
+
+# Use Rust 2021 edition formatting
+edition = "2021"
+
+# Max line width
+max_width = 100
+
+# Use spaces for indentation (4 spaces)
+hard_tabs = false
+tab_spaces = 4
+
+# Other formatting preferences
+use_small_heuristics = "Default"

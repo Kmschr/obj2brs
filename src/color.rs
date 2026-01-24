@@ -13,7 +13,7 @@ pub fn modulus(a: f32, b: f32) -> f32 {
 }
 
 pub fn float_equals(a: f32, b: f32) -> bool {
-    let error_margin = std::f32::EPSILON;
+    let error_margin = f32::EPSILON;
     (b - a).abs() < error_margin
 }
 
@@ -133,9 +133,9 @@ pub fn convert_colorset_to_hsv(colorset: &[brickadia::save::Color]) -> Vec<Vecto
 
 pub fn match_hsv_to_colorset(colorset: &[Vector4<f32>], color: &Vector4<f32>) -> usize {
     let mut min = 0;
-    let mut min_distance = hsv_distance(&colorset[0], &color);
+    let mut min_distance = hsv_distance(&colorset[0], color);
     for (i, cs) in colorset.iter().enumerate() {
-        let distance = hsv_distance(&cs, &color);
+        let distance = hsv_distance(cs, color);
         if distance < min_distance {
             min_distance = distance;
             min = i;
