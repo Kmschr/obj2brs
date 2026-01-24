@@ -1,6 +1,7 @@
 mod barycentric;
 mod brdb_support;
 mod color;
+mod error;
 mod gui;
 mod icon;
 mod intersect;
@@ -14,8 +15,9 @@ use brickadia as brs;
 use brs::save::Preview;
 use cgmath::Vector4;
 use eframe::{egui, egui::*, run_native, App, NativeOptions};
+use error::{ConversionError, ConversionResult, MissingResources};
 use gui::bool_color;
-use rfd::FileDialog;
+use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use simplify::*;
 use std::{
     env, fs::File, io::Cursor, ops::RangeInclusive, path::Path, path::PathBuf, sync::mpsc,
@@ -125,7 +127,9 @@ impl Obj2Brs {
             if let Ok(data) = rx.try_recv() {
                 self.input_file_path_receiver = None;
                 if let Some(path) = data {
-                    self.input_file_path = path.into_os_string().into_string().unwrap();
+                    if let Ok(path_str) = path.into_os_string().into_string() {
+                        self.input_file_path = path_str;
+                    }
                 }
             }
         }
@@ -134,7 +138,9 @@ impl Obj2Brs {
             if let Ok(data) = rx.try_recv() {
                 self.output_directory_receiver = None;
                 if let Some(path) = data {
-                    self.output_directory = path.into_os_string().into_string().unwrap();
+                    if let Ok(path_str) = path.into_os_string().into_string() {
+                        self.output_directory = path_str;
+                    }
                 }
             }
         }
@@ -155,7 +161,7 @@ impl Obj2Brs {
                 self.input_file_path_receiver = Some(rx);
                 thread::spawn(move || {
                     let obj_path = FileDialog::new().add_filter("OBJ", &["obj"]).pick_file();
-                    tx.send(obj_path).unwrap();
+                    let _ = tx.send(obj_path);
                 });
             }
         });
@@ -181,7 +187,7 @@ impl Obj2Brs {
                         dialog = dialog.set_directory(Path::new(default_dir.as_str()));
                     }
                     let output_dir = dialog.pick_folder();
-                    tx.send(output_dir).unwrap();
+                    let _ = tx.send(output_dir);
                 });
             }
         });
@@ -306,28 +312,135 @@ impl Obj2Brs {
             self.bricktype = BrickType::Default;
         }
 
-        println!("{:?}", self);
-        let mut octree = match generate_octree(self) {
-            Ok(tree) => tree,
+        // Validate resources before conversion
+        let missing = match validate_obj_resources(&self.input_file_path) {
+            Ok(m) => m,
             Err(e) => {
-                println!("{}", e);
-                println!("Check that your .mtl file exists and doesn't contain any spaces in the filename!");
-                println!("If your .mtl has spaces, rename the file and edit the .obj file to point to the new .mtl file");
+                MessageDialog::new()
+                    .set_level(MessageLevel::Error)
+                    .set_title("Conversion Error")
+                    .set_description(&format!("{}", e))
+                    .show();
                 return;
             }
         };
 
-        write_brs_data(&mut octree, self);
+        // If there are missing resources, ask user what to do
+        let skip_textures = if missing.has_issues() {
+            let message = format!(
+                "The following issues were found:\n\n{}\n\
+                Do you want to continue without the missing textures?\n\n\
+                • Yes: Use solid colors from material definitions\n\
+                • No: Cancel conversion so you can fix the file structure",
+                missing.description()
+            );
+
+            let result = MessageDialog::new()
+                .set_level(MessageLevel::Warning)
+                .set_title("Missing Resources")
+                .set_description(&message)
+                .set_buttons(MessageButtons::YesNo)
+                .show();
+
+            // If user clicked No or closed the dialog, cancel conversion
+            if result != MessageDialogResult::Yes {
+                return;
+            }
+            true
+        } else {
+            false
+        };
+
+        println!("{:?}", self);
+        let mut octree = match generate_octree(self, skip_textures) {
+            Ok(tree) => tree,
+            Err(e) => {
+                MessageDialog::new()
+                    .set_level(MessageLevel::Error)
+                    .set_title("Conversion Failed")
+                    .set_description(&format!("{}", e))
+                    .show();
+                return;
+            }
+        };
+
+        if let Err(e) = write_brs_data(&mut octree, self) {
+            MessageDialog::new()
+                .set_level(MessageLevel::Error)
+                .set_title("Save Failed")
+                .set_description(&format!("{}", e))
+                .show();
+        }
     }
 }
 
-fn generate_octree(opt: &Obj2Brs) -> Result<octree::VoxelTree<Vector4<u8>>, String> {
-    let p: &Path = opt.input_file_path.as_ref();
-    println!("Loading {:?}", p);
-    match File::open(p) {
-        Ok(_f) => println!("success"),
-        Err(e) => println!("{}", e),
+/// Creates a 1x1 solid color texture from material color
+fn create_solid_color_texture(diffuse: [f32; 3], dissolve: f32) -> image::RgbaImage {
+    let mut img = image::RgbaImage::new(1, 1);
+    img.put_pixel(
+        0,
+        0,
+        image::Rgba([
+            color::ftoi(diffuse[0]),
+            color::ftoi(diffuse[1]),
+            color::ftoi(diffuse[2]),
+            color::ftoi(dissolve),
+        ]),
+    );
+    img
+}
+
+/// Validates OBJ file and checks for missing resources
+fn validate_obj_resources(obj_path: &str) -> ConversionResult<MissingResources> {
+    let p = Path::new(obj_path);
+
+    // Check if OBJ file exists
+    if !p.exists() {
+        return Err(ConversionError::ObjFileNotFound { path: p.to_path_buf() });
     }
+
+    let load_options = LoadOptions {
+        triangulate: true,
+        ignore_lines: true,
+        ignore_points: true,
+        single_index: true,
+    };
+
+    let (_models, materials) = tobj::load_obj(obj_path, &load_options)
+        .map_err(|e| ConversionError::ObjParseError(e.to_string()))?;
+
+    let mut missing = MissingResources::new();
+
+    // Check if materials exist
+    let materials = match materials {
+        Ok(mats) if !mats.is_empty() => mats,
+        Ok(_) | Err(_) => {
+            missing.missing_materials = true;
+            return Ok(missing);
+        }
+    };
+
+    // Check each material for missing textures
+    for material in materials {
+        if let Some(texture_name) = &material.diffuse_texture {
+            if !texture_name.is_empty() {
+                let texture_path = p.parent()
+                    .ok_or_else(|| ConversionError::ObjFileNotFound { path: p.to_path_buf() })?
+                    .join(texture_name);
+
+                if !texture_path.exists() {
+                    missing.missing_textures.push((material.name.clone(), texture_path));
+                }
+            }
+        }
+    }
+
+    Ok(missing)
+}
+
+fn generate_octree(opt: &Obj2Brs, skip_textures: bool) -> ConversionResult<octree::VoxelTree<Vector4<u8>>> {
+    let p = Path::new(&opt.input_file_path);
+    println!("Loading {:?}", p);
 
     println!("Importing model...");
     let load_options = LoadOptions {
@@ -336,66 +449,70 @@ fn generate_octree(opt: &Obj2Brs) -> Result<octree::VoxelTree<Vector4<u8>>, Stri
         ignore_points: true,
         single_index: true,
     };
-    let (mut models, materials) = match tobj::load_obj(&opt.input_file_path, &load_options) {
-        Err(e) => {
-            return Err(format!(
-                "Error encountered when loading obj file: {}",
-                e
-            ))
-        }
-        Ok(f) => f,
-    };
+    let (mut models, materials) = tobj::load_obj(&opt.input_file_path, &load_options)
+        .map_err(|e| ConversionError::ObjParseError(e.to_string()))?;
 
     println!("Loading materials...");
     let mut material_images = Vec::<image::RgbaImage>::new();
-    for material in materials.unwrap() {
-        if material.diffuse_texture.is_none() || material.diffuse_texture.as_ref().unwrap() == "" {
-            println!(
-                "\tMaterial {} does not have an associated diffuse texture",
-                material.name
-            );
 
-            // Create mock texture from diffuse color
-            let mut image = image::RgbaImage::new(1, 1);
+    let materials = materials.unwrap_or_else(|_| Vec::new());
 
-            let diffuse = material.diffuse.unwrap_or([1.0, 1.0, 1.0]);
-            let dissolve = material.dissolve.unwrap_or(1.0);
+    if materials.is_empty() {
+        println!("\tNo materials found, using default white color");
+        material_images.push(create_solid_color_texture([1.0, 1.0, 1.0], 1.0));
+    } else {
+        for material in materials {
+            // Try to load texture if available and not skipping
+            if !skip_textures {
+                if let Some(ref texture_name) = material.diffuse_texture {
+                    if texture_name.is_empty() {
+                        // Empty texture name, use material color
+                        let diffuse = material.diffuse.unwrap_or([1.0, 1.0, 1.0]);
+                        let dissolve = material.dissolve.unwrap_or(1.0);
+                        material_images.push(create_solid_color_texture(diffuse, dissolve));
+                        continue;
+                    }
+                let image_path = p.parent()
+                    .ok_or_else(|| ConversionError::ObjFileNotFound { path: p.to_path_buf() })?
+                    .join(texture_name);
 
-            image.put_pixel(
-                0,
-                0,
-                image::Rgba([
-                    color::ftoi(diffuse[0]),
-                    color::ftoi(diffuse[1]),
-                    color::ftoi(diffuse[2]),
-                    color::ftoi(dissolve),
-                ]),
-            );
+                println!(
+                    "\tLoading diffuse texture for {} from: {:?}",
+                    material.name, image_path
+                );
 
-            material_images.push(image);
-        } else {
-            let texture_name = material.diffuse_texture.as_ref().unwrap();
-            let image_path = Path::new(&opt.input_file_path)
-                .parent()
-                .unwrap()
-                .join(texture_name);
-            println!(
-                "\tLoading diffuse texture for {} from: {:?}",
-                material.name, image_path
-            );
-
-            let image = match image::open(&image_path) {
-                Err(e) => {
-                    return Err(format!(
-                        "Error encountered when loading {} texture file from {:?}: {}",
-                        texture_name,
-                        &image_path,
-                        e
-                    ))
+                    // Try to load texture
+                    match image::open(&image_path) {
+                        Ok(img) => {
+                            material_images.push(img.into_rgba8());
+                        }
+                        Err(e) => {
+                            return Err(ConversionError::TextureLoadError {
+                                path: image_path,
+                                reason: e.to_string(),
+                            });
+                        }
+                    }
+                } else {
+                    // No texture or empty texture name
+                    println!(
+                        "\tMaterial {} does not have a texture, using material color",
+                        material.name
+                    );
+                    let diffuse = material.diffuse.unwrap_or([1.0, 1.0, 1.0]);
+                    let dissolve = material.dissolve.unwrap_or(1.0);
+                    material_images.push(create_solid_color_texture(diffuse, dissolve));
                 }
-                Ok(f) => f.into_rgba8(),
-            };
-            material_images.push(image);
+            } else {
+                // Skipping textures, use material color
+                println!(
+                    "\tSkipping textures for material {}, using material color",
+                    material.name
+                );
+                let diffuse = material.diffuse.unwrap_or([1.0, 1.0, 1.0]);
+                let dissolve = material.dissolve.unwrap_or(1.0);
+                material_images.push(create_solid_color_texture(diffuse, dissolve));
+            }
         }
     }
 
@@ -408,7 +525,7 @@ fn generate_octree(opt: &Obj2Brs) -> Result<octree::VoxelTree<Vector4<u8>>, Stri
     ))
 }
 
-fn write_brs_data(octree: &mut octree::VoxelTree<Vector4<u8>>, opts: &mut Obj2Brs) {
+fn write_brs_data(octree: &mut octree::VoxelTree<Vector4<u8>>, opts: &mut Obj2Brs) -> ConversionResult<()> {
     let mut max_merge = 500;
     if opts.rampify {
         max_merge = 1;
@@ -416,7 +533,8 @@ fn write_brs_data(octree: &mut octree::VoxelTree<Vector4<u8>>, opts: &mut Obj2Br
 
     let owner = brs::save::User {
         name: opts.save_owner_name.clone(),
-        id: opts.save_owner_id.parse().unwrap(),
+        id: opts.save_owner_id.parse()
+            .map_err(|_| ConversionError::ObjParseError("Invalid UUID".to_string()))?,
     };
 
     let mut write_data = brs::save::SaveData {
@@ -485,20 +603,23 @@ fn write_brs_data(octree: &mut octree::VoxelTree<Vector4<u8>>, opts: &mut Obj2Br
     // Write file
     println!("Writing {} bricks...", write_data.bricks.len());
 
-    let preview = image::load_from_memory_with_format(OBJ_ICON, image::ImageFormat::Png).unwrap();
+    let preview = image::load_from_memory_with_format(OBJ_ICON, image::ImageFormat::Png)
+        .map_err(|e| ConversionError::SaveWriteError(format!("Failed to load preview icon: {}", e)))?;
 
     let mut preview_bytes = Vec::new();
     preview
         .write_to(&mut Cursor::new(&mut preview_bytes), image::ImageOutputFormat::Png)
-        .unwrap();
+        .map_err(|e| ConversionError::SaveWriteError(format!("Failed to encode preview: {}", e)))?;
 
     write_data.preview = Preview::PNG(preview_bytes);
 
     if opts.use_legacy_format {
         let output_file_path = opts.output_directory.clone() + "/" + &opts.save_name + ".brs";
-        brs::write::SaveWriter::new(File::create(output_file_path).unwrap(), write_data)
+        let file = File::create(&output_file_path)
+            .map_err(|e| ConversionError::SaveWriteError(format!("Failed to create output file: {}", e)))?;
+        brs::write::SaveWriter::new(file, write_data)
             .write()
-            .unwrap();
+            .map_err(|e| ConversionError::SaveWriteError(format!("Failed to write .brs file: {}", e)))?;
         println!("Legacy .brs Save Written!");
     } else {
         let output_file_path =
@@ -510,7 +631,7 @@ fn write_brs_data(octree: &mut octree::VoxelTree<Vector4<u8>>, opts: &mut Obj2Br
         let mut preview_bytes_jpg = Vec::new();
         preview
             .write_to(&mut Cursor::new(&mut preview_bytes_jpg), image::ImageOutputFormat::Jpeg(85))
-            .unwrap();
+            .map_err(|e| ConversionError::SaveWriteError(format!("Failed to encode JPEG preview: {}", e)))?;
 
         brdb_support::write_brz(
             output_file_path,
@@ -521,23 +642,24 @@ fn write_brs_data(octree: &mut octree::VoxelTree<Vector4<u8>>, opts: &mut Obj2Br
     }
 
     println!("Save Written!");
+    Ok(())
 }
 
 fn main() {
     let build_dir = match env::consts::OS {
         "windows" => {
             dirs::data_local_dir()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_string()
-                + "\\Brickadia\\Saved\\Builds"
+                .and_then(|p| p.to_str().map(|s| s.to_string()))
+                .map(|s| s + "\\Brickadia\\Saved\\Builds")
+                .unwrap_or_else(|| "builds".to_string())
         }
         "linux" => {
-            dirs::config_dir().unwrap().to_str().unwrap().to_string()
-                + "/Epic/Brickadia/Saved/Builds"
+            dirs::config_dir()
+                .and_then(|p| p.to_str().map(|s| s.to_string()))
+                .map(|s| s + "/Epic/Brickadia/Saved/Builds")
+                .unwrap_or_else(|| "builds".to_string())
         }
-        _ => String::new(),
+        _ => "builds".to_string(),
     };
 
     let build_dir_clone = build_dir.clone();
