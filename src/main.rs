@@ -13,7 +13,7 @@ mod voxelize;
 use brickadia as brs;
 use brs::save::Preview;
 use cgmath::Vector4;
-use eframe::{egui, egui::*, epi::App, run_native, NativeOptions};
+use eframe::{egui, egui::*, run_native, App, NativeOptions};
 use gui::bool_color;
 use rfd::FileDialog;
 use simplify::*;
@@ -93,7 +93,7 @@ impl Default for Obj2Brs {
 }
 
 impl App for Obj2Brs {
-    fn update(&mut self, ctx: &egui::Context, _frame: &eframe::epi::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.receive_file_dialog_messages();
 
         let input_file_valid = Path::new(&self.input_file_path).exists();
@@ -116,10 +116,6 @@ impl App for Obj2Brs {
 
             gui::footer(ctx);
         });
-    }
-
-    fn name(&self) -> &str {
-        "obj2brs"
     }
 }
 
@@ -264,7 +260,7 @@ impl Obj2Brs {
             ui.add(
                 DragValue::new(&mut self.brick_scale)
                     .prefix("x")
-                    .clamp_range(1..=500),
+                    .range(1..=500),
             );
         }
 
@@ -544,19 +540,26 @@ fn main() {
         _ => String::new(),
     };
 
-    let app = Obj2Brs {
-        output_directory: build_dir,
-        ..Default::default()
-    };
+    let build_dir_clone = build_dir.clone();
     let win_option = NativeOptions {
-        initial_window_size: Some([WINDOW_WIDTH, WINDOW_HEIGHT].into()),
-        resizable: false,
-        icon_data: Some(eframe::epi::IconData {
-            rgba: icon::ICON.to_vec(),
-            width: 32,
-            height: 32,
-        }),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([WINDOW_WIDTH, WINDOW_HEIGHT])
+            .with_resizable(false)
+            .with_icon(egui::IconData {
+                rgba: icon::ICON.to_vec(),
+                width: 32,
+                height: 32,
+            }),
         ..Default::default()
     };
-    run_native(Box::new(app), win_option);
+    let _ = run_native(
+        "obj2brs",
+        win_option,
+        Box::new(|_cc| {
+            Ok(Box::new(Obj2Brs {
+                output_directory: build_dir_clone,
+                ..Default::default()
+            }))
+        }),
+    );
 }

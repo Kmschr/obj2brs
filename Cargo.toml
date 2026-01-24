@@ -16,9 +16,9 @@ cgmath = "0.18"
 image = "0.24"
 uuid = "1.0"
 chrono = "0.4"
-eframe = "0.17"
+eframe = "0.33"
 dirs = "6.0"
-rfd = "0.10"
+rfd = "0.17"
 rampifier = { git = "https://github.com/Wrapperup/rampifier", rev = "90b12aa0b4fae8e84cc3b295476300bcd28d7808" }
 
 [features]
