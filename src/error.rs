@@ -61,11 +61,11 @@ impl MissingResources {
         }
 
         if !self.missing_textures.is_empty() {
-            desc.push_str(&format!("• {} missing texture(s):\n", self.missing_textures.len()));
+            desc.push_str(&format!("• {} missing texture(s):\n\n", self.missing_textures.len()));
             for (material, path) in &self.missing_textures {
-                desc.push_str(&format!("  - {} ({})\n",
-                    path.file_name().unwrap_or_default().to_string_lossy(),
-                    material));
+                desc.push_str(&format!("  Material: {}\n", material));
+                desc.push_str(&format!("  Expected: {}\n\n",
+                    path.display()));
             }
         }
 
