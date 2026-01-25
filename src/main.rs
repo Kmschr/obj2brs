@@ -18,6 +18,7 @@ use error::{ConversionError, ConversionResult, MissingResources};
 use gui::bool_color;
 use logger::Logger;
 use rfd::{FileDialog, MessageDialog, MessageLevel};
+use serde::{Deserialize, Serialize};
 use simplify::*;
 use std::{
     env, io::Cursor, ops::RangeInclusive, path::Path, path::PathBuf, sync::mpsc,
@@ -40,15 +41,17 @@ const WINDOW_HEIGHT: f32 = 700.;
 
 const OBJ_ICON: &[u8; 10987] = include_bytes!("../res/obj_icon.png");
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Obj2Brs {
     pub bricktype: BrickType,
     pub brick_scale: isize,
+    #[serde(skip)]
     input_file_path_receiver: Option<Receiver<Option<PathBuf>>>,
     input_file_path: String,
     pub match_brickadia_colorset: bool,
     material: Material,
     material_intensity: u32,
+    #[serde(skip)]
     output_directory_receiver: Option<Receiver<Option<PathBuf>>>,
     output_directory: String,
     save_owner_id: String,
@@ -60,21 +63,26 @@ pub struct Obj2Brs {
     grid_offset_x: f32,
     grid_offset_y: f32,
     grid_offset_z: f32,
+    #[serde(skip)]
     missing_resources_dialog: Option<String>,
+    #[serde(skip)]
     pending_conversion_skip_textures: bool,
+    #[serde(skip)]
     logger: Logger,
+    #[serde(skip)]
     conversion_in_progress: bool,
+    #[serde(skip)]
     conversion_done_receiver: Option<Receiver<()>>,
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
 pub enum BrickType {
     Microbricks,
     Default,
     Tiles,
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
 pub enum Material {
     Plastic,
     Glass,
@@ -115,6 +123,10 @@ impl Default for Obj2Brs {
 }
 
 impl App for Obj2Brs {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, eframe::APP_KEY, self);
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Request repaint to keep updating logs
         ctx.request_repaint();
@@ -927,12 +939,32 @@ fn main() {
     let _ = run_native(
         "obj2brs",
         win_option,
-        Box::new(move |_cc| {
-            Ok(Box::new(Obj2Brs {
-                output_directory: build_dir_clone,
-                logger: logger.clone(),
-                ..Default::default()
-            }))
+        Box::new(move |cc| {
+            // Load previous state if available
+            let mut app = if let Some(storage) = cc.storage {
+                eframe::get_value(storage, eframe::APP_KEY).unwrap_or_else(|| Obj2Brs {
+                    output_directory: build_dir_clone.clone(),
+                    logger: logger.clone(),
+                    ..Default::default()
+                })
+            } else {
+                Obj2Brs {
+                    output_directory: build_dir_clone.clone(),
+                    logger: logger.clone(),
+                    ..Default::default()
+                }
+            };
+
+            // Always re-initialize transient fields
+            app.logger = logger.clone();
+            app.conversion_in_progress = false;
+            app.input_file_path_receiver = None;
+            app.output_directory_receiver = None;
+            app.conversion_done_receiver = None;
+            app.missing_resources_dialog = None;
+            app.pending_conversion_skip_textures = false;
+
+            Ok(Box::new(app))
         }),
     );
 }
