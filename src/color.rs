@@ -122,10 +122,10 @@ pub fn hsv_average(colors: &[Vector4<u8>]) -> Vector4<f32> {
     Vector4::<f32>::new(h_sum / n, s_sum / n, v_sum / n, a_sum / n)
 }
 
-pub fn convert_colorset_to_hsv(colorset: &[brickadia::save::Color]) -> Vec<Vector4<f32>> {
+pub fn convert_colorset_to_hsv(colorset: &[brdb::Color]) -> Vec<Vector4<f32>> {
     let mut converted_colorset = Vec::<Vector4<f32>>::with_capacity(colorset.len());
     for c in colorset {
-        converted_colorset.push(rgb2hsv(Vector4::new(c.r, c.g, c.b, c.a)));
+        converted_colorset.push(rgb2hsv(Vector4::new(c.r, c.g, c.b, 255)));
     }
 
     converted_colorset

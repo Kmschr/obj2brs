@@ -17,28 +17,23 @@ struct Triangle {
 }
 
 pub fn voxelize(
-    models: &mut [tobj::Model],
+    models: &[tobj::Model],
     materials: &[RgbaImage],
-    scale: f32,
-    bricktype: BrickType,
+    _scale: f32,
+    _bricktype: BrickType,
+    material_filter: Option<usize>,
 ) -> VoxelTree<Vector4<u8>> {
     let mut octree = VoxelTree::<Vector4<u8>>::new();
 
     // Determine model AABB to expand triangle octree to final size
-    // Multiply y-coordinate by 2.5 to take into account plates
-    let yscale = if bricktype == BrickType::Microbricks { 1.0 } else { 2.5 };
-
+    // Models are already scaled by scale_models()
     let u = &models[0].mesh.positions; // Guess initial
-    let mut min = Vector3::new(u[0] * scale, u[1] * yscale * scale, u[2] * scale);
+    let mut min = Vector3::new(u[0], u[1], u[2]);
     let mut max = min;
 
-    for m in models.iter_mut() {
-        let p = &mut m.mesh.positions;
+    for m in models.iter() {
+        let p = &m.mesh.positions;
         for v in (0..p.len()).step_by(3) {
-            p[v] *= scale;
-            p[v + 1] *= yscale * scale;
-            p[v + 2] *= scale;
-
             for m in 0..3 {
                 min[m] = min[m].min(p[v + m]);
                 max[m] = max[m].max(p[v + m]);
@@ -68,6 +63,13 @@ pub fn voxelize(
     for m in models.iter() {
         let mesh = &m.mesh;
         let material = mesh.material_id;
+
+        // Skip if material doesn't match filter
+        if let Some(filter_id) = material_filter {
+            if material != Some(filter_id) {
+                continue;
+            }
+        }
 
         for n in (0..mesh.indices.len()).step_by(3) {
             let mut m = (3 * mesh.indices[n]) as usize;

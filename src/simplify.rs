@@ -1,18 +1,24 @@
 use crate::color::*;
 use crate::octree::{TreeBody, VoxelTree};
-use crate::BrickType;
-use crate::Obj2Brs;
+use crate::{BrickType, Obj2Brs, SaveData};
 
-use brickadia::save as brs;
+use brdb::{Brick, BrickSize, BrickType as BrdbBrickType, Color, Direction, Position, Rotation};
 use cgmath::{Vector3, Vector4};
+
+// Enum to represent brick colors (index or unique)
+#[derive(Debug, Clone, Copy)]
+pub enum BrickColor {
+    Index(u32),
+    Unique(Color),
+}
 
 pub fn simplify_lossy(
     octree: &mut VoxelTree<Vector4<u8>>,
-    save_data: &mut brs::SaveData,
+    save_data: &mut SaveData,
     opts: &Obj2Brs,
     max_merge: isize,
 ) {
-    let colorset = convert_colorset_to_hsv(&save_data.header2.colors);
+    let colorset = convert_colorset_to_hsv(&save_data.colors);
     let scales: (isize, isize, isize) = if opts.bricktype == BrickType::Microbricks {
         (opts.brick_scale, opts.brick_scale, opts.brick_scale)
     } else {
@@ -113,47 +119,37 @@ pub fn simplify_lossy(
 
         let avg_color = hsv_average(&colors);
         let color = if opts.match_brickadia_colorset {
-            brs::BrickColor::Index(match_hsv_to_colorset(&colorset, &avg_color) as u32)
+            BrickColor::Index(match_hsv_to_colorset(&colorset, &avg_color) as u32)
         } else {
             let rgba = gamma_correct(hsv2rgb(avg_color));
-            brs::BrickColor::Unique(brs::Color {
-                r: rgba[0],
-                g: rgba[1],
-                b: rgba[2],
-                a: rgba[3],
-            })
+            BrickColor::Unique(Color::new(rgba[0], rgba[1], rgba[2]))
         };
 
         let width = xp - x;
         let height = yp - y;
         let depth = zp - z;
 
-        save_data.bricks.push(brs::Brick {
-            asset_name_index: if opts.bricktype == BrickType::Microbricks {
-                0
-            } else {
-                1
-            },
-            // Coordinates are rotated
-            size: scaled_size(scales, (width, depth, height)),
-            position: scaled_pos(scales, (width, depth, height), (x, z, y)),
+        save_data.bricks.push(create_brick(
+            opts,
+            &save_data.colors,
+            scales,
+            (width, depth, height),
+            (x, z, y),
             color,
-            material_intensity: opts.material_intensity,
-            ..Default::default()
-        });
+        ));
     }
 }
 
 pub fn simplify_lossless(
     octree: &mut VoxelTree<Vector4<u8>>,
-    save_data: &mut brs::SaveData,
+    save_data: &mut SaveData,
     opts: &Obj2Brs,
     max_merge: isize,
 ) {
     let d: isize = 1 << octree.size;
     let len = d + 1;
 
-    let colorset = convert_colorset_to_hsv(&save_data.header2.colors);
+    let colorset = convert_colorset_to_hsv(&save_data.colors);
 
     let scales: (isize, isize, isize) = if opts.bricktype == BrickType::Microbricks {
         (opts.brick_scale, opts.brick_scale, opts.brick_scale)
@@ -181,12 +177,11 @@ pub fn simplify_lossless(
                 TreeBody::Leaf(leaf_color) => {
                     let final_color = gamma_correct(*leaf_color);
                     matched_color = match_hsv_to_colorset(&colorset, &rgb2hsv(final_color));
-                    unmatched_color = brs::BrickColor::Unique(brs::Color {
-                        r: final_color[0],
-                        g: final_color[1],
-                        b: final_color[2],
-                        a: final_color[3],
-                    });
+                    unmatched_color = BrickColor::Unique(Color::new(
+                        final_color[0],
+                        final_color[1],
+                        final_color[2],
+                    ));
                 }
                 _ => break,
             }
@@ -286,44 +281,82 @@ pub fn simplify_lossless(
         let depth = zp - z;
 
         let color = if opts.match_brickadia_colorset {
-            brs::BrickColor::Index(matched_color as u32)
+            BrickColor::Index(matched_color as u32)
         } else {
             unmatched_color
         };
 
-        save_data.bricks.push(brs::Brick {
-            asset_name_index: if opts.bricktype == BrickType::Microbricks {
-                0
-            } else {
-                1
-            },
-            // Coordinates are rotated
-            size: scaled_size(scales, (width, depth, height)),
-            position: scaled_pos(scales, (width, depth, height), (x, z, y)),
+        save_data.bricks.push(create_brick(
+            opts,
+            &save_data.colors,
+            scales,
+            (width, depth, height),
+            (x, z, y),
             color,
-            owner_index: 1,
-            material_intensity: opts.material_intensity,
-            ..Default::default()
-        });
+        ));
     }
 }
 
-fn scaled_size(scale: (isize, isize, isize), size: (isize, isize, isize)) -> brs::Size {
-    brs::Size::Procedural(
-        (scale.0 * size.0) as u32,
-        (scale.1 * size.1) as u32,
-        (scale.2 * size.2) as u32,
-    )
-}
-
-fn scaled_pos(
+fn create_brick(
+    opts: &Obj2Brs,
+    palette: &[Color],
     scale: (isize, isize, isize),
     size: (isize, isize, isize),
     pos: (isize, isize, isize),
-) -> (i32, i32, i32) {
-    (
-        (scale.0 * size.0 + 2 * scale.0 * pos.0) as i32,
-        (scale.1 * size.1 + 2 * scale.1 * pos.1) as i32,
-        (scale.2 * size.2 + 2 * scale.2 * pos.2) as i32,
-    )
+    color: BrickColor,
+) -> Brick {
+    let brick_size = BrickSize::new(
+        (scale.0 * size.0) as u16,
+        (scale.1 * size.1) as u16,
+        (scale.2 * size.2) as u16,
+    );
+
+    let position = Position {
+        x: (scale.0 * size.0 + 2 * scale.0 * pos.0) as i32,
+        y: (scale.1 * size.1 + 2 * scale.1 * pos.1) as i32,
+        z: (scale.2 * size.2 + 2 * scale.2 * pos.2) as i32,
+    };
+
+    let asset_name = if opts.bricktype == BrickType::Microbricks {
+        "PB_DefaultMicroBrick"
+    } else if opts.bricktype == BrickType::Tiles {
+        "PB_DefaultTile"
+    } else {
+        "PB_DefaultBrick"
+    };
+
+    let brick_type = BrdbBrickType::from((asset_name, brick_size));
+
+    let brick_color = match color {
+        BrickColor::Unique(c) => c,
+        BrickColor::Index(idx) => {
+            if (idx as usize) < palette.len() {
+                palette[idx as usize]
+            } else {
+                Color::new(255, 255, 255)
+            }
+        }
+    };
+
+    Brick {
+        id: None,
+        asset: brick_type,
+        owner_index: None,
+        position,
+        rotation: Rotation::Deg0,
+        direction: Direction::ZPositive,
+        collision: Default::default(),
+        visible: true,
+        color: brick_color,
+        material: match opts.material {
+            crate::Material::Plastic => "BMC_Plastic".into(),
+            crate::Material::Glass => "BMC_Glass".into(),
+            crate::Material::Glow => "BMC_Glow".into(),
+            crate::Material::Metallic => "BMC_Metallic".into(),
+            crate::Material::Hologram => "BMC_Hologram".into(),
+            crate::Material::Ghost => "BMC_Ghost".into(),
+        },
+        material_intensity: opts.material_intensity as u8,
+        components: Vec::new(),
+    }
 }

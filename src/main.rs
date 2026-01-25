@@ -5,30 +5,38 @@ mod error;
 mod gui;
 mod icon;
 mod intersect;
+mod logger;
 mod octree;
 mod palette;
-mod rampify;
 mod simplify;
 mod voxelize;
 
-use brickadia as brs;
-use brs::save::Preview;
+use brdb::{Brick, Color, Entity};
 use cgmath::Vector4;
 use eframe::{egui, egui::*, run_native, App, NativeOptions};
 use error::{ConversionError, ConversionResult, MissingResources};
 use gui::bool_color;
-use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
+use logger::Logger;
+use rfd::{FileDialog, MessageDialog, MessageLevel};
 use simplify::*;
 use std::{
-    env, fs::File, io::Cursor, ops::RangeInclusive, path::Path, path::PathBuf, sync::mpsc,
+    env, io::Cursor, ops::RangeInclusive, path::Path, path::PathBuf, sync::mpsc,
     sync::mpsc::Receiver, thread,
 };
 use tobj::LoadOptions;
 use uuid::Uuid;
 use voxelize::voxelize;
 
+// Intermediate data structure for building the save
+#[derive(Clone)]
+pub struct SaveData {
+    pub bricks: Vec<Brick>,
+    pub colors: Vec<Color>,
+    pub author_name: String,
+}
+
 const WINDOW_WIDTH: f32 = 600.;
-const WINDOW_HEIGHT: f32 = 480.;
+const WINDOW_HEIGHT: f32 = 700.;
 
 const OBJ_ICON: &[u8; 10987] = include_bytes!("../res/obj_icon.png");
 
@@ -45,12 +53,18 @@ pub struct Obj2Brs {
     output_directory: String,
     save_owner_id: String,
     save_owner_name: String,
-    raise: bool,
-    rampify: bool,
     save_name: String,
     scale: f32,
     simplify: bool,
-    use_legacy_format: bool,
+    split_by_material: bool,
+    grid_offset_x: f32,
+    grid_offset_y: f32,
+    grid_offset_z: f32,
+    missing_resources_dialog: Option<String>,
+    pending_conversion_skip_textures: bool,
+    logger: Logger,
+    conversion_in_progress: bool,
+    conversion_done_receiver: Option<Receiver<()>>,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -84,36 +98,102 @@ impl Default for Obj2Brs {
             output_directory: "builds".into(),
             save_owner_id: "d66c4ad5-59fc-4a9b-80b8-08dedc25bff9".into(),
             save_owner_name: "obj2brs".into(),
-            raise: true,
-            rampify: false,
             save_name: "test".into(),
             scale: 1.0,
             simplify: false,
-            use_legacy_format: false,
+            split_by_material: false,
+            grid_offset_x: 0.0,
+            grid_offset_y: 0.0,
+            grid_offset_z: 0.0,
+            missing_resources_dialog: None,
+            pending_conversion_skip_textures: false,
+            logger: Logger::new(),
+            conversion_in_progress: false,
+            conversion_done_receiver: None,
         }
     }
 }
 
 impl App for Obj2Brs {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Request repaint to keep updating logs
+        ctx.request_repaint();
+
         self.receive_file_dialog_messages();
 
         let input_file_valid = Path::new(&self.input_file_path).exists();
         let output_dir_valid = Path::new(&self.output_directory).is_dir();
         let uuid_valid = Uuid::parse_str(&self.save_owner_id).is_ok();
-        let can_convert = input_file_valid && output_dir_valid && uuid_valid;
+        let can_convert = input_file_valid && output_dir_valid && uuid_valid && !self.conversion_in_progress;
+
+        // Show missing resources dialog if needed
+        self.show_missing_resources_dialog(ctx);
 
         CentralPanel::default().show(ctx, |ui: &mut Ui| {
-            gui::add_grid(ui, |ui| self.paths(ui, input_file_valid, output_dir_valid));
-            gui::add_horizontal_line(ui);
-            gui::add_grid(ui, |ui| self.options(ui, uuid_valid));
-            gui::info_text(ui);
+            ui.vertical(|ui| {
+                ScrollArea::vertical()
+                    .max_height(400.0)
+                    .show(ui, |ui| {
+                        gui::add_grid(ui, |ui| self.paths(ui, input_file_valid, output_dir_valid));
+                        gui::add_horizontal_line(ui);
+                        gui::add_grid(ui, |ui| self.options(ui, uuid_valid));
 
-            ui.add_space(10.);
-            ui.vertical_centered(|ui| {
-                if gui::button(ui, "Voxelize", can_convert) {
-                    self.do_conversion()
-                }
+                        ui.add_space(5.);
+                        CollapsingHeader::new("Advanced Options")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                gui::add_grid(ui, |ui| self.advanced_options(ui, uuid_valid));
+                                ui.add_space(5.);
+                                gui::info_text(ui);
+                            });
+
+                        ui.add_space(10.);
+                        ui.horizontal(|ui| {
+                            let available_width = ui.available_width();
+                            ui.add_space((available_width - 60.0) / 2.0);
+                            let button_text = if self.conversion_in_progress {
+                                "Converting..."
+                            } else {
+                                "Voxelize"
+                            };
+                            if gui::button(ui, button_text, can_convert) {
+                                self.do_conversion()
+                            }
+                        });
+                        ui.add_space(10.);
+                    });
+
+                // Log panel
+                ui.add_space(5.);
+                ui.separator();
+                ui.add_space(5.);
+
+                Frame::default()
+                    .fill(egui::Color32::from_gray(20))
+                    .inner_margin(8.0)
+                    .show(ui, |ui| {
+                        ScrollArea::vertical()
+                            .max_height(150.0)
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                let messages = self.logger.get_messages();
+                                if messages.is_empty() {
+                                    ui.label(
+                                        RichText::new("No logs yet...")
+                                            .color(egui::Color32::GRAY)
+                                            .monospace()
+                                    );
+                                } else {
+                                    for message in messages {
+                                        ui.label(
+                                            RichText::new(message)
+                                                .color(egui::Color32::LIGHT_GREEN)
+                                                .monospace()
+                                        );
+                                    }
+                                }
+                            });
+                    });
             });
 
             gui::footer(ctx);
@@ -142,6 +222,14 @@ impl Obj2Brs {
                         self.output_directory = path_str;
                     }
                 }
+            }
+        }
+
+        // Check if conversion is done
+        if let Some(rx) = &self.conversion_done_receiver {
+            if rx.try_recv().is_ok() {
+                self.conversion_done_receiver = None;
+                self.conversion_in_progress = false;
             }
         }
     }
@@ -194,47 +282,16 @@ impl Obj2Brs {
         ui.end_row();
 
         ui.label("Save Name")
-            .on_hover_text("Name for the brickadia savefile");
+            .on_hover_text("Name for the Brickadia savefile (.brz format)");
         ui.add(TextEdit::singleline(&mut self.save_name));
         ui.end_row();
     }
 
-    fn options(&mut self, ui: &mut Ui, uuid_valid: bool) {
+    fn options(&mut self, ui: &mut Ui, _uuid_valid: bool) {
         ui.label("Lossy Conversion").on_hover_text(
             "Whether or not to merge similar bricks to create a less detailed model",
         );
-        ui.add_enabled(
-            !self.rampify,
-            Checkbox::new(&mut self.simplify, "Simplify (reduces brickcount)"),
-        );
-        ui.end_row();
-
-        ui.label("Raise Underground")
-            .on_hover_text("Prevents bricks under the ground plate in Brickadia");
-        ui.add(Checkbox::new(&mut self.raise, ""));
-        ui.end_row();
-
-        ui.label("Legacy Format (.brs)")
-            .on_hover_text("Use the old .brs save format instead of the new .brz format");
-        ui.add(Checkbox::new(&mut self.use_legacy_format, ""));
-        ui.end_row();
-
-        ui.label("Match to Colorset").on_hover_text(
-            "Modify the color of the model to match the default color palette in Brickadia",
-        );
-        ui.add_enabled(
-            !self.rampify,
-            Checkbox::new(&mut self.match_brickadia_colorset, "Use Default Palette"),
-        );
-        ui.end_row();
-
-        ui.label("Rampify").on_hover_text(
-            "Creates a Lego-World like rampification of the model, uses default colorset",
-        );
-        ui.add(Checkbox::new(
-            &mut self.rampify,
-            "Run the result through Wrapperup's plate-rampifier",
-        ));
+        ui.add(Checkbox::new(&mut self.simplify, "Simplify (reduces brickcount)"));
         ui.end_row();
 
         ui.label("Scale")
@@ -249,26 +306,14 @@ impl Obj2Brs {
 
         ui.label("Bricktype")
             .on_hover_text("Which type of bricks will make up the generated save, use default to get a stud texture");
-        ui.add_enabled_ui(!self.rampify, |ui| {
-            ComboBox::from_label("")
-                .selected_text(format!("{:?}", &mut self.bricktype))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.bricktype, BrickType::Microbricks, "Microbricks");
-                    ui.selectable_value(&mut self.bricktype, BrickType::Default, "Default");
-                    ui.selectable_value(&mut self.bricktype, BrickType::Tiles, "Tiles");
-                });
-        });
+        ComboBox::from_label("")
+            .selected_text(format!("{:?}", &mut self.bricktype))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.bricktype, BrickType::Microbricks, "Microbricks");
+                ui.selectable_value(&mut self.bricktype, BrickType::Default, "Default");
+                ui.selectable_value(&mut self.bricktype, BrickType::Tiles, "Tiles");
+            });
         ui.end_row();
-
-        if self.bricktype == BrickType::Microbricks {
-            ui.label("Brick Scale")
-                .on_hover_text("Use this to make microbricks bigger for a more pixelated look");
-            ui.add(
-                DragValue::new(&mut self.brick_scale)
-                    .prefix("x")
-                    .range(1..=500),
-            );
-        }
 
         ui.label("Material");
         ComboBox::from_label("\n")
@@ -282,13 +327,58 @@ impl Obj2Brs {
                 ui.selectable_value(&mut self.material, Material::Ghost, "Ghost");
             });
         ui.end_row();
+    }
 
+    fn advanced_options(&mut self, ui: &mut Ui, uuid_valid: bool) {
         ui.label("Material Intensity");
         ui.add(Slider::new(
             &mut self.material_intensity,
             RangeInclusive::new(0, 10),
         ));
         ui.end_row();
+
+        ui.label("Match to Colorset").on_hover_text(
+            "Modify the color of the model to match the default color palette in Brickadia",
+        );
+        ui.add(Checkbox::new(&mut self.match_brickadia_colorset, "Use Default Palette"));
+        ui.end_row();
+
+        ui.label("Split by Material (Experimental)").on_hover_text(
+            "Process each OBJ material separately into frozen grids",
+        );
+        ui.add(Checkbox::new(&mut self.split_by_material, "Separate grids per material"));
+        ui.end_row();
+
+        if self.split_by_material {
+            ui.label("Grid Offset X").on_hover_text(
+                "Horizontal spacing between material grids",
+            );
+            ui.add(DragValue::new(&mut self.grid_offset_x).suffix(" units").speed(10.0));
+            ui.end_row();
+
+            ui.label("Grid Offset Y").on_hover_text(
+                "Forward/back spacing between material grids",
+            );
+            ui.add(DragValue::new(&mut self.grid_offset_y).suffix(" units").speed(10.0));
+            ui.end_row();
+
+            ui.label("Grid Offset Z").on_hover_text(
+                "Vertical spacing between material grids",
+            );
+            ui.add(DragValue::new(&mut self.grid_offset_z).suffix(" units").speed(10.0));
+            ui.end_row();
+        }
+
+        if self.bricktype == BrickType::Microbricks {
+            ui.label("Brick Scale")
+                .on_hover_text("Use this to make microbricks bigger for a more pixelated look");
+            ui.add(
+                DragValue::new(&mut self.brick_scale)
+                    .prefix("x")
+                    .range(1..=500),
+            );
+            ui.end_row();
+        }
 
         let id_color = bool_color(uuid_valid);
 
@@ -305,13 +395,56 @@ impl Obj2Brs {
         ui.end_row();
     }
 
-    fn do_conversion(&mut self) {
-        if self.rampify {
-            self.simplify = false;
-            self.match_brickadia_colorset = true;
-            self.bricktype = BrickType::Default;
-        }
+    fn show_missing_resources_dialog(&mut self, ctx: &egui::Context) {
+        if let Some(message) = &self.missing_resources_dialog.clone() {
+            let mut open = true;
+            Window::new("⚠ Missing Resources")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .fixed_size([500.0, 400.0])
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.vertical(|ui| {
+                        ScrollArea::vertical()
+                            .max_height(280.0)
+                            .show(ui, |ui| {
+                                ui.label(message);
+                            });
 
+                        ui.add_space(10.);
+                        ui.separator();
+                        ui.add_space(10.);
+
+                        ui.label("Do you want to continue without the missing textures?");
+                        ui.add_space(5.);
+                        ui.label("• Yes: Use solid colors from material definitions");
+                        ui.label("• No: Cancel conversion so you can fix the missing textures");
+
+                        ui.add_space(10.);
+                        ui.horizontal(|ui| {
+                            ui.add_space(100.0);
+                            if ui.button("Yes").clicked() {
+                                self.missing_resources_dialog = None;
+                                self.pending_conversion_skip_textures = true;
+                                self.continue_conversion(true);
+                            }
+                            if ui.button("No").clicked() {
+                                self.missing_resources_dialog = None;
+                                self.pending_conversion_skip_textures = false;
+                            }
+                        });
+                    });
+                });
+
+            if !open {
+                self.missing_resources_dialog = None;
+                self.pending_conversion_skip_textures = false;
+            }
+        }
+    }
+
+    fn do_conversion(&mut self) {
         // Validate resources before conversion
         let missing = match validate_obj_resources(&self.input_file_path) {
             Ok(m) => m,
@@ -326,51 +459,83 @@ impl Obj2Brs {
         };
 
         // If there are missing resources, ask user what to do
-        let skip_textures = if missing.has_issues() {
-            let message = format!(
-                "The following issues were found:\n\n{}\n\
-                Do you want to continue without the missing textures?\n\n\
-                • Yes: Use solid colors from material definitions\n\
-                • No: Cancel conversion so you can fix the file structure",
-                missing.description()
-            );
+        if missing.has_issues() {
+            let message = format!("The following issues were found:\n\n{}", missing.description());
+            self.missing_resources_dialog = Some(message);
+            return;
+        }
 
-            let result = MessageDialog::new()
-                .set_level(MessageLevel::Warning)
-                .set_title("Missing Resources")
-                .set_description(&message)
-                .set_buttons(MessageButtons::YesNo)
-                .show();
+        // No missing resources, continue with conversion
+        self.continue_conversion(false);
+    }
 
-            // If user clicked No or closed the dialog, cancel conversion
-            if result != MessageDialogResult::Yes {
-                return;
-            }
-            true
-        } else {
-            false
-        };
+    fn continue_conversion(&mut self, skip_textures: bool) {
+        self.conversion_in_progress = true;
+        self.logger.log("Starting conversion...".to_string());
 
-        println!("{:?}", self);
-        let mut octree = match generate_octree(self, skip_textures) {
-            Ok(tree) => tree,
-            Err(e) => {
+        // Create channel to signal completion
+        let (tx, rx) = mpsc::channel();
+        self.conversion_done_receiver = Some(rx);
+
+        // Clone data needed for the background thread
+        let input_file_path = self.input_file_path.clone();
+        let output_directory = self.output_directory.clone();
+        let save_name = self.save_name.clone();
+        let save_owner_name = self.save_owner_name.clone();
+        let scale = self.scale;
+        let bricktype = self.bricktype;
+        let simplify = self.simplify;
+        let split_by_material = self.split_by_material;
+        let grid_offset_x = self.grid_offset_x;
+        let grid_offset_y = self.grid_offset_y;
+        let grid_offset_z = self.grid_offset_z;
+        let match_brickadia_colorset = self.match_brickadia_colorset;
+        let brick_scale = self.brick_scale;
+        let material = self.material;
+        let material_intensity = self.material_intensity;
+        let logger = self.logger.clone();
+
+        // Spawn background thread for conversion
+        thread::spawn(move || {
+            // Create a minimal Obj2Brs for the conversion functions
+            let opts = Obj2Brs {
+                bricktype,
+                brick_scale,
+                input_file_path_receiver: None,
+                input_file_path,
+                match_brickadia_colorset,
+                material,
+                material_intensity,
+                output_directory_receiver: None,
+                output_directory,
+                save_owner_id: "d66c4ad5-59fc-4a9b-80b8-08dedc25bff9".into(),
+                save_owner_name,
+                save_name,
+                scale,
+                simplify,
+                split_by_material,
+                grid_offset_x,
+                grid_offset_y,
+                grid_offset_z,
+                missing_resources_dialog: None,
+                pending_conversion_skip_textures: false,
+                logger: logger.clone(),
+                conversion_in_progress: true,
+                conversion_done_receiver: None,
+            };
+
+            if let Err(e) = perform_conversion(&opts, skip_textures) {
+                logger.log(format!("Error: {}", e));
                 MessageDialog::new()
                     .set_level(MessageLevel::Error)
                     .set_title("Conversion Failed")
                     .set_description(&format!("{}", e))
                     .show();
-                return;
             }
-        };
 
-        if let Err(e) = write_brs_data(&mut octree, self) {
-            MessageDialog::new()
-                .set_level(MessageLevel::Error)
-                .set_title("Save Failed")
-                .set_description(&format!("{}", e))
-                .show();
-        }
+            // Signal completion
+            let _ = tx.send(());
+        });
     }
 }
 
@@ -438,11 +603,80 @@ fn validate_obj_resources(obj_path: &str) -> ConversionResult<MissingResources> 
     Ok(missing)
 }
 
-fn generate_octree(opt: &Obj2Brs, skip_textures: bool) -> ConversionResult<octree::VoxelTree<Vector4<u8>>> {
-    let p = Path::new(&opt.input_file_path);
-    println!("Loading {:?}", p);
+fn perform_conversion(opts: &Obj2Brs, skip_textures: bool) -> ConversionResult<()> {
+    if opts.split_by_material {
+        // Load models and materials once
+        opts.logger.log("Loading models and materials...".to_string());
+        let (mut models, material_images) = load_models_and_materials(opts, skip_textures)?;
+        let material_count = material_images.len();
 
-    println!("Importing model...");
+        if material_count == 0 {
+            opts.logger.log("No materials found, falling back to single grid".to_string());
+            let mut octree = voxelize_models(&mut models, &material_images, opts, None);
+            return write_brz_data(&mut octree, opts, None);
+        }
+
+        opts.logger.log(format!("Found {} materials, processing each separately", material_count));
+
+        // Process each material separately
+        let mut material_grids: Vec<(Entity, Vec<Brick>)> = Vec::new();
+
+        for mat_id in 0..material_count {
+            opts.logger.log(format!("Processing material {} of {}", mat_id + 1, material_count));
+
+            // Voxelize only this material
+            let mut octree = voxelize_models(&mut models, &material_images, opts, Some(mat_id));
+
+            let max_merge = 500;
+            let mut save_data = SaveData {
+                bricks: Vec::new(),
+                colors: palette::DEFAULT_PALETTE.to_vec(),
+                author_name: opts.save_owner_name.clone(),
+            };
+
+            opts.logger.log(format!("Simplifying material {}...", mat_id));
+            if opts.simplify {
+                simplify_lossy(&mut octree, &mut save_data, opts, max_merge);
+            } else {
+                simplify_lossless(&mut octree, &mut save_data, opts, max_merge);
+            }
+
+            if !save_data.bricks.is_empty() {
+                opts.logger.log(format!("Material {} generated {} bricks", mat_id, save_data.bricks.len()));
+
+                // Create a frozen grid entity for this material with user-defined offset
+                let offset_multiplier = mat_id as f32;
+                let entity = Entity {
+                    frozen: true,
+                    location: brdb::Vector3f {
+                        x: opts.grid_offset_x * offset_multiplier,
+                        y: opts.grid_offset_y * offset_multiplier,
+                        z: opts.grid_offset_z * offset_multiplier,
+                    },
+                    ..Default::default()
+                };
+
+                material_grids.push((entity, save_data.bricks));
+            } else {
+                opts.logger.log(format!("Material {} had no bricks, skipping", mat_id));
+            }
+        }
+
+        write_brz_with_grids(opts, material_grids)
+    } else {
+        // Regular single-grid conversion
+        let mut octree = generate_octree(opts, skip_textures, None)?;
+        write_brz_data(&mut octree, opts, None)
+    }
+}
+
+fn load_models_and_materials(
+    opt: &Obj2Brs,
+    skip_textures: bool,
+) -> ConversionResult<(Vec<tobj::Model>, Vec<image::RgbaImage>)> {
+    let p = Path::new(&opt.input_file_path);
+
+    opt.logger.log("Importing model...".to_string());
     let load_options = LoadOptions {
         triangulate: true,
         ignore_lines: true,
@@ -452,13 +686,13 @@ fn generate_octree(opt: &Obj2Brs, skip_textures: bool) -> ConversionResult<octre
     let (mut models, materials) = tobj::load_obj(&opt.input_file_path, &load_options)
         .map_err(|e| ConversionError::ObjParseError(e.to_string()))?;
 
-    println!("Loading materials...");
+    opt.logger.log("Loading materials...".to_string());
     let mut material_images = Vec::<image::RgbaImage>::new();
 
     let materials = materials.unwrap_or_else(|_| Vec::new());
 
     if materials.is_empty() {
-        println!("\tNo materials found, using default white color");
+        opt.logger.log("  No materials found, using default white color".to_string());
         material_images.push(create_solid_color_texture([1.0, 1.0, 1.0], 1.0));
     } else {
         for material in materials {
@@ -472,14 +706,14 @@ fn generate_octree(opt: &Obj2Brs, skip_textures: bool) -> ConversionResult<octre
                         material_images.push(create_solid_color_texture(diffuse, dissolve));
                         continue;
                     }
-                let image_path = p.parent()
-                    .ok_or_else(|| ConversionError::ObjFileNotFound { path: p.to_path_buf() })?
-                    .join(texture_name);
+                    let image_path = p.parent()
+                        .ok_or_else(|| ConversionError::ObjFileNotFound { path: p.to_path_buf() })?
+                        .join(texture_name);
 
-                println!(
-                    "\tLoading diffuse texture for {} from: {:?}",
-                    material.name, image_path
-                );
+                    opt.logger.log(format!(
+                        "  Loading diffuse texture for {} from: {:?}",
+                        material.name, image_path
+                    ));
 
                     // Try to load texture
                     match image::open(&image_path) {
@@ -495,20 +729,20 @@ fn generate_octree(opt: &Obj2Brs, skip_textures: bool) -> ConversionResult<octre
                     }
                 } else {
                     // No texture or empty texture name
-                    println!(
-                        "\tMaterial {} does not have a texture, using material color",
+                    opt.logger.log(format!(
+                        "  Material {} does not have a texture, using material color",
                         material.name
-                    );
+                    ));
                     let diffuse = material.diffuse.unwrap_or([1.0, 1.0, 1.0]);
                     let dissolve = material.dissolve.unwrap_or(1.0);
                     material_images.push(create_solid_color_texture(diffuse, dissolve));
                 }
             } else {
                 // Skipping textures, use material color
-                println!(
-                    "\tSkipping textures for material {}, using material color",
+                opt.logger.log(format!(
+                    "  Skipping textures for material {}, using material color",
                     material.name
-                );
+                ));
                 let diffuse = material.diffuse.unwrap_or([1.0, 1.0, 1.0]);
                 let dissolve = material.dissolve.unwrap_or(1.0);
                 material_images.push(create_solid_color_texture(diffuse, dissolve));
@@ -516,136 +750,152 @@ fn generate_octree(opt: &Obj2Brs, skip_textures: bool) -> ConversionResult<octre
         }
     }
 
-    println!("Voxelizing...");
-    Ok(voxelize(
-        &mut models,
-        &material_images,
-        opt.scale,
-        opt.bricktype,
-    ))
+    // Scale models
+    scale_models(&mut models, opt.scale, opt.bricktype);
+
+    Ok((models, material_images))
 }
 
-fn write_brs_data(octree: &mut octree::VoxelTree<Vector4<u8>>, opts: &mut Obj2Brs) -> ConversionResult<()> {
-    let mut max_merge = 500;
-    if opts.rampify {
-        max_merge = 1;
+fn scale_models(models: &mut [tobj::Model], scale: f32, bricktype: BrickType) {
+    // Determine model AABB to expand triangle octree to final size
+    // Multiply y-coordinate by 2.5 to take into account plates
+    let yscale = if bricktype == BrickType::Microbricks { 1.0 } else { 2.5 };
+
+    for m in models.iter_mut() {
+        let p = &mut m.mesh.positions;
+        for v in (0..p.len()).step_by(3) {
+            p[v] *= scale;
+            p[v + 1] *= yscale * scale;
+            p[v + 2] *= scale;
+        }
     }
 
-    let owner = brs::save::User {
-        name: opts.save_owner_name.clone(),
-        id: opts.save_owner_id.parse()
-            .map_err(|_| ConversionError::ObjParseError("Invalid UUID".to_string()))?,
-    };
+    // Raise mesh so no vertices are vertically negative
+    if let Some(first_model) = models.first() {
+        let positions = &first_model.mesh.positions;
+        if !positions.is_empty() {
+            let mut min_z = positions[2];
+            for m in models.iter() {
+                let p = &m.mesh.positions;
+                for v in (0..p.len()).step_by(3) {
+                    min_z = min_z.min(p[v + 2]);
+                }
+            }
 
-    let mut write_data = brs::save::SaveData {
-        header1: brs::save::Header1 {
-            author: owner.clone(),
-            host: Some(owner.clone()),
-            ..Default::default()
-        },
-        header2: brs::save::Header2 {
-            brick_assets: vec![
-                "PB_DefaultMicroBrick".into(),
-                "PB_DefaultBrick".into(),
-                "PB_DefaultRamp".into(),
-                "PB_DefaultWedge".into(),
-                "PB_DefaultTile".into(),
-            ],
-            materials: match opts.material {
-                Material::Plastic => vec!["BMC_Plastic".into()],
-                Material::Glass => vec!["BMC_Glass".into()],
-                Material::Glow => vec!["BMC_Glow".into()],
-                Material::Metallic => vec!["BMC_Metallic".into()],
-                Material::Hologram => vec!["BMC_Hologram".into()],
-                Material::Ghost => vec!["BMC_Ghost".into()],
-            },
-            brick_owners: vec![brs::save::BrickOwner::from_user_bricks(owner.clone(), 1)],
-            colors: palette::DEFAULT_PALETTE.to_vec(),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    if opts.bricktype == BrickType::Tiles {
-        write_data.header2.brick_assets[1] = "PB_DefaultTile".into();
-    }
-
-    println!("Simplifying...");
-    if opts.simplify {
-        simplify_lossy(octree, &mut write_data, opts, max_merge);
-    } else {
-        simplify_lossless(octree, &mut write_data, opts, max_merge);
-    }
-
-    if opts.raise {
-        println!("Raising...");
-        let mut min_z = 0;
-        for brick in &write_data.bricks {
-            let height = match brick.size {
-                brs::save::Size::Procedural(_x, _y, z) => z,
-                _ => 0,
-            };
-            let z = brick.position.2 - height as i32;
-            if z < min_z {
-                min_z = z;
+            if min_z < 0.0 {
+                let z_offset = -min_z;
+                for m in models.iter_mut() {
+                    let p = &mut m.mesh.positions;
+                    for v in (0..p.len()).step_by(3) {
+                        p[v + 2] += z_offset;
+                    }
+                }
             }
         }
+    }
+}
 
-        for brick in &mut write_data.bricks {
-            brick.position.2 -= min_z;
-        }
+fn voxelize_models(
+    models: &mut [tobj::Model],
+    material_images: &[image::RgbaImage],
+    opts: &Obj2Brs,
+    material_filter: Option<usize>,
+) -> octree::VoxelTree<Vector4<u8>> {
+    if let Some(filter_id) = material_filter {
+        opts.logger.log(format!("Voxelizing material {}...", filter_id));
+    } else {
+        opts.logger.log("Voxelizing...".to_string());
+    }
+    voxelize(models, material_images, opts.scale, opts.bricktype, material_filter)
+}
+
+fn generate_octree(opt: &Obj2Brs, skip_textures: bool, material_filter: Option<usize>) -> ConversionResult<octree::VoxelTree<Vector4<u8>>> {
+    opt.logger.log(format!("Loading {:?}", Path::new(&opt.input_file_path)));
+    let (mut models, material_images) = load_models_and_materials(opt, skip_textures)?;
+    Ok(voxelize_models(&mut models, &material_images, opt, material_filter))
+}
+
+fn write_brz_data(octree: &mut octree::VoxelTree<Vector4<u8>>, opts: &Obj2Brs, material_id: Option<usize>) -> ConversionResult<()> {
+    let max_merge = 500;
+
+    let mut save_data = SaveData {
+        bricks: Vec::new(),
+        colors: palette::DEFAULT_PALETTE.to_vec(),
+        author_name: opts.save_owner_name.clone(),
+    };
+
+    if let Some(id) = material_id {
+        opts.logger.log(format!("Simplifying material {}...", id));
+    } else {
+        opts.logger.log("Simplifying...".to_string());
     }
 
-    if opts.rampify {
-        rampify::rampify(&mut write_data);
+    if opts.simplify {
+        simplify_lossy(octree, &mut save_data, opts, max_merge);
+    } else {
+        simplify_lossless(octree, &mut save_data, opts, max_merge);
     }
 
     // Write file
-    println!("Writing {} bricks...", write_data.bricks.len());
+    opts.logger.log(format!("Writing {} bricks...", save_data.bricks.len()));
 
     let preview = image::load_from_memory_with_format(OBJ_ICON, image::ImageFormat::Png)
         .map_err(|e| ConversionError::SaveWriteError(format!("Failed to load preview icon: {}", e)))?;
 
-    let mut preview_bytes = Vec::new();
+    // Convert preview to Jpeg for BRZ
+    let mut preview_bytes_jpg = Vec::new();
     preview
-        .write_to(&mut Cursor::new(&mut preview_bytes), image::ImageOutputFormat::Png)
-        .map_err(|e| ConversionError::SaveWriteError(format!("Failed to encode preview: {}", e)))?;
+        .write_to(&mut Cursor::new(&mut preview_bytes_jpg), image::ImageOutputFormat::Jpeg(85))
+        .map_err(|e| ConversionError::SaveWriteError(format!("Failed to encode JPEG preview: {}", e)))?;
 
-    write_data.preview = Preview::PNG(preview_bytes);
+    let output_file_path =
+        PathBuf::from(&opts.output_directory).join(opts.save_name.clone() + ".brz");
 
-    if opts.use_legacy_format {
-        let output_file_path = opts.output_directory.clone() + "/" + &opts.save_name + ".brs";
-        let file = File::create(&output_file_path)
-            .map_err(|e| ConversionError::SaveWriteError(format!("Failed to create output file: {}", e)))?;
-        brs::write::SaveWriter::new(file, write_data)
-            .write()
-            .map_err(|e| ConversionError::SaveWriteError(format!("Failed to write .brs file: {}", e)))?;
-        println!("Legacy .brs Save Written!");
-    } else {
-        let output_file_path =
-            PathBuf::from(&opts.output_directory).join(opts.save_name.clone() + ".brz");
-        // Determine if we should use procedural bricks based on brick type
-        let use_procedural = opts.bricktype != BrickType::Default;
+    // Determine if we should use procedural bricks based on brick type
+    let use_procedural = opts.bricktype != BrickType::Default;
 
-        // Convert preview to Jpeg for BRZ
-        let mut preview_bytes_jpg = Vec::new();
-        preview
-            .write_to(&mut Cursor::new(&mut preview_bytes_jpg), image::ImageOutputFormat::Jpeg(85))
-            .map_err(|e| ConversionError::SaveWriteError(format!("Failed to encode JPEG preview: {}", e)))?;
+    brdb_support::write_brz(
+        output_file_path.clone(),
+        &save_data,
+        opts,
+        use_procedural,
+        Some(preview_bytes_jpg),
+    )?;
 
-        brdb_support::write_brz(
-            output_file_path,
-            &write_data,
-            use_procedural,
-            Some(preview_bytes_jpg),
-        );
-    }
+    opts.logger.log(format!("Save written to: {:?}", output_file_path));
+    Ok(())
+}
 
-    println!("Save Written!");
+fn write_brz_with_grids(opts: &Obj2Brs, grids: Vec<(Entity, Vec<Brick>)>) -> ConversionResult<()> {
+    opts.logger.log(format!("Writing {} frozen grids...", grids.len()));
+
+    let preview = image::load_from_memory_with_format(OBJ_ICON, image::ImageFormat::Png)
+        .map_err(|e| ConversionError::SaveWriteError(format!("Failed to load preview icon: {}", e)))?;
+
+    // Convert preview to Jpeg for BRZ
+    let mut preview_bytes_jpg = Vec::new();
+    preview
+        .write_to(&mut Cursor::new(&mut preview_bytes_jpg), image::ImageOutputFormat::Jpeg(85))
+        .map_err(|e| ConversionError::SaveWriteError(format!("Failed to encode JPEG preview: {}", e)))?;
+
+    let output_file_path =
+        PathBuf::from(&opts.output_directory).join(opts.save_name.clone() + ".brz");
+
+    brdb_support::write_brz_grids(
+        output_file_path.clone(),
+        grids,
+        opts,
+        Some(preview_bytes_jpg),
+    )?;
+
+    opts.logger.log(format!("Save written to: {:?}", output_file_path));
     Ok(())
 }
 
 fn main() {
+    let logger = Logger::new();
+    logger.log("obj2brs started - ready to convert OBJ files to Brickadia saves".to_string());
+
     let build_dir = match env::consts::OS {
         "windows" => {
             dirs::data_local_dir()
@@ -677,9 +927,10 @@ fn main() {
     let _ = run_native(
         "obj2brs",
         win_option,
-        Box::new(|_cc| {
+        Box::new(move |_cc| {
             Ok(Box::new(Obj2Brs {
                 output_directory: build_dir_clone,
+                logger: logger.clone(),
                 ..Default::default()
             }))
         }),
